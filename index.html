@@ -453,6 +453,22 @@ function autoNextLabel(day, shift){
   return p ? dateLabel(p.date) + (p.shifted ? ' 주말 밀림' : '') : '';
 }
 
+/** 반복 예정 지출의 다음 회차 날짜. 오늘보다 뒤가 될 때까지 넘긴다 */
+function rollPlanDate(dateStr, repeat, anchor){
+  if(!repeat) return null;
+  let [Y,M,D] = dateStr.split('-').map(Number);
+  D = anchor || D;                                     // 31일·2월 29일이 앞선 달에 밀려 굳지 않도록 원래 날짜 기준
+  const today = todayStr();
+  for(let i=0;i<200;i++){
+    if(repeat==='yearly') Y++;
+    else { M++; if(M>12){ M=1; Y++; } }
+    const last = new Date(Y, M, 0).getDate();          // 2월 29일 같은 날은 그 달 말일로 맞춘다
+    const s = Y+'-'+String(M).padStart(2,'0')+'-'+String(Math.min(D,last)).padStart(2,'0');
+    if(s > today) return s;
+  }
+  return null;
+}
+
 /** 밀린 자동이체를 오늘까지 만들어 넣는다 */
 function runAutos(){
   if(!S.autoLog) S.autoLog = {};
@@ -575,6 +591,12 @@ function render(){
       </div>`;
   };
 
+  const HORIZON = 30;                                  // 앞으로 30일까지를 '곧 나갈 돈'으로 본다
+  const limit = (()=>{ const d=new Date(); d.setDate(d.getDate()+HORIZON); return ymd(d); })();
+  const plans = (S.plans||[]).slice().sort((a,b)=> a.date<b.date?-1:a.date>b.date?1:0);
+  const plansSoon = plans.filter(p=>p.date<=limit);
+  const plannedSum = plansSoon.reduce((s,p)=>s+p.amount,0);
+
   const cardUse = S.cards.map(c=>{
     const rows = mTx.filter(t=>t.type==='expense' && t.cardId===c.id);
     return { c, sum: rows.reduce((s,t)=>s+t.amount,0), n: rows.length };
@@ -636,6 +658,10 @@ function render(){
       <span class="op">따로</span><span>모아둔 돈 <b>${won(saved)}</b></span>
       <span class="op">· 위 계산에서 빼둔 돈</span>
     </div>`:''}
+    ${plannedSum?`<div class="equation num" style="margin-top:7px">
+      <span class="op">앞으로 ${HORIZON}일</span><span>예정 지출 <b>${won(plannedSum)}</b></span>
+      <span class="op">→ 그래도 남는 돈</span><b style="${free-plannedSum<0?'color:var(--out)':''}">${won(free-plannedSum)}</b>
+    </div>`:''}
     ${free<0?`<div class="warn">카드 결제 예정액이 통장 잔액보다 ${won(-free)} 많습니다.</div>`:''}
     ${soon.length?`<div class="warn" style="color:var(--due)">결제일 임박 · ${esc(soon.join(' / '))}</div>`:''}
   </div>
@@ -685,6 +711,26 @@ function render(){
     <button class="act" data-open="transfer">계좌 이체</button>
     <button class="act" data-open="cardpay">카드값 결제</button>
     <button class="act" data-open="import">명세서 불러오기</button>
+  </div>
+
+  <div class="section">
+    <div class="sechead"><h2>예정 지출</h2><span class="num" style="font-size:.85rem;color:var(--ink-soft)">${plans.length?won(plans.reduce((s,p)=>s+p.amount,0)):''}</span></div>
+    ${plans.length? plans.map(p=>{
+      const late = p.date < todayStr();
+      const dd = Math.round((new Date(p.date+'T00:00:00') - startOfToday())/86400000);
+      return `
+      <div class="row">
+        <span class="name"><span class="t">${esc(p.name)}${p.repeat?` <span class="tag">${p.repeat==='yearly'?'매년':'매달'}</span>`:''}${late?' <span class="tag" style="color:var(--out);border-color:var(--out)">지난 날짜</span>':''}</span>
+          <span class="s">${p.date.slice(5).replace('-','.')} · ${late? Math.abs(dd)+'일 지남' : dd===0?'오늘':dd+'일 뒤'}${p.category?' · '+esc(p.category):''}</span></span>
+        <span class="amt num">${won(p.amount)}</span>
+        <span class="tools">
+          <button class="icon" data-done-plan="${p.id}">썼음</button>
+          ${p.repeat?`<button class="icon" data-skip-plan="${p.id}">넘기기</button>`:''}
+          <button class="icon" data-edit-plan="${p.id}">수정</button>
+          <button class="icon" data-del-plan="${p.id}">삭제</button>
+        </span>
+      </div>`;}).join('') : `<div class="hint">생일, 경조사, 세금처럼 날짜가 정해진 목돈을 넣어두면 쓸 수 있는 돈에서 미리 빼서 보여줍니다.</div>`}
+    <button class="addlink" data-open="plan">예정 지출 추가</button>
   </div>
 
   <div class="section">
@@ -744,6 +790,22 @@ function bind(){
   document.querySelectorAll('[data-demo]').forEach(b=>b.onclick=demo);
   document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;render();});
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>openForm('cardpay',{cardId:b.dataset.pay}));
+  document.querySelectorAll('[data-edit-plan]').forEach(b=>b.onclick=()=>openForm('plan',{id:b.dataset.editPlan}));
+  document.querySelectorAll('[data-del-plan]').forEach(b=>b.onclick=()=>{
+    const p=(S.plans||[]).find(v=>v.id===b.dataset.delPlan);
+    if(p&&p.repeat&&!confirm(`'${p.name}'은 ${p.repeat==='yearly'?'매년':'매달'} 반복입니다. 앞으로도 안 쓸 거면 지우고, 이번만 넘길 거면 넘기기를 누르세요.\n\n지울까요?`)) return;
+    S.plans=(S.plans||[]).filter(v=>v.id!==b.dataset.delPlan); commit('예정 지출을 지웠습니다.');
+  });
+  document.querySelectorAll('[data-skip-plan]').forEach(b=>b.onclick=()=>{
+    const p=(S.plans||[]).find(v=>v.id===b.dataset.skipPlan); if(!p) return;
+    const next=rollPlanDate(p.date,p.repeat,p.anchor);
+    if(!next){ toast('다음 날짜를 계산할 수 없습니다.'); return; }
+    p.date=next; commit(`다음은 ${next.replace(/-/g,'.')}입니다.`);
+  });
+  document.querySelectorAll('[data-done-plan]').forEach(b=>b.onclick=()=>{
+    const p=(S.plans||[]).find(v=>v.id===b.dataset.donePlan); if(!p) return;
+    openForm('expense',{plan:p});
+  });
   document.querySelectorAll('[data-edit-auto]').forEach(b=>b.onclick=()=>openForm('auto',{id:b.dataset.editAuto}));
   document.querySelectorAll('[data-off-auto]').forEach(b=>b.onclick=()=>{
     const x=(S.autos||[]).find(v=>v.id===b.dataset.offAuto); if(!x) return;
@@ -935,14 +997,15 @@ function openForm(kind, ctx={}){
       ...(isOut? S.cards.map(c=>({v:'c:'+c.id,l:c.name+(c.type==='credit'?' (신용)':' (체크)')})):[])
     ];
     m.innerHTML=`
-      <h3>${isOut?'지출 기록':'수입 기록'}</h3>
-      <p class="sub">${isOut?'신용카드로 쓰면 통장 잔액은 그대로 두고 결제 예정액에 쌓입니다.':'통장에 들어온 돈을 남깁니다.'}</p>
-      <div class="field"><label for="f1">금액</label><input id="f1" class="money" inputmode="numeric" placeholder="0"></div>
+      <h3>${ctx.plan? '예정 지출 기록' : (isOut?'지출 기록':'수입 기록')}</h3>
+      <p class="sub">${ctx.plan? `'${esc(ctx.plan.name)}'을 실제 지출로 옮깁니다. 금액이 다르면 고쳐 주세요.`
+        : (isOut?'신용카드로 쓰면 통장 잔액은 그대로 두고 결제 예정액에 쌓입니다.':'통장에 들어온 돈을 남깁니다.')}</p>
+      <div class="field"><label for="f1">금액</label><input id="f1" class="money" inputmode="numeric" placeholder="0" value="${ctx.plan?ctx.plan.amount.toLocaleString('ko-KR'):''}"></div>
       <div class="field"><label for="f2">${isOut?'결제 수단':'받은 통장'}</label><select id="f2">${methods.map(o=>`<option value="${o.v}">${esc(o.l)}</option>`).join('')}</select></div>
-      ${isOut?`<div class="field"><label for="f3">분류</label><select id="f3">${CATS.map(c=>`<option>${c}</option>`).join('')}</select></div>`:''}
+      ${isOut?`<div class="field"><label for="f3">분류</label><select id="f3">${CATS.map(c=>`<option ${ctx.plan&&ctx.plan.category===c?'selected':''}>${c}</option>`).join('')}</select></div>`:''}
       <div class="two">
-        <div class="field"><label for="f4">날짜</label><input id="f4" type="date" value="${todayStr()}"></div>
-        <div class="field"><label for="f5">메모</label><input id="f5" placeholder="${isOut?'예: 마트 장보기':'예: 급여'}"></div>
+        <div class="field"><label for="f4">날짜</label><input id="f4" type="date" value="${ctx.plan? todayStr() : todayStr()}"></div>
+        <div class="field"><label for="f5">메모</label><input id="f5" placeholder="${isOut?'예: 마트 장보기':'예: 급여'}" value="${ctx.plan?esc(ctx.plan.name):''}"></div>
       </div>
       <div class="err" id="err"></div>
       <div class="mfoot"><span></span><span class="right">
@@ -960,7 +1023,17 @@ function openForm(kind, ctx={}){
         t.cardId=id;
         if(c.type==='debit') t.accountId=c.accountId;
       }
-      S.txns.push(t); month=monthOf(t.date); closeModal(); commit(isOut?'지출을 기록했습니다.':'수입을 기록했습니다.');
+      S.txns.push(t); month=monthOf(t.date);
+      let rolled = null;
+      if(ctx.plan){
+        const cur=(S.plans||[]).find(v=>v.id===ctx.plan.id);
+        const next = cur && cur.repeat ? rollPlanDate(cur.date, cur.repeat, cur.anchor) : null;
+        if(cur && next){ cur.date = next; rolled = next; }
+        else S.plans=(S.plans||[]).filter(v=>v.id!==ctx.plan.id);
+      }
+      closeModal(); commit(ctx.plan
+        ? (rolled? `기록했습니다. 다음은 ${rolled.replace(/-/g,'.')}입니다.` : '예정 지출을 기록으로 옮겼습니다.')
+        : (isOut?'지출을 기록했습니다.':'수입을 기록했습니다.'));
     };
   }
 
@@ -1028,6 +1101,40 @@ function openForm(kind, ctx={}){
       const date=$('#f4').value||todayStr();
       S.txns.push({id:uid(),seq:Date.now(),type:'cardpay',amount:amt,cardId:$('#f2').value,accountId:$('#f3').value,date,memo:''});
       month=monthOf(date); closeModal(); commit('카드값 결제를 기록했습니다.');
+    };
+  }
+
+  else if(kind==='plan'){
+    const p = ctx.id ? (S.plans||[]).find(v=>v.id===ctx.id) : null;
+    m.innerHTML=`
+      <h3>${p?'예정 지출 수정':'예정 지출 추가'}</h3>
+      <p class="sub">아직 안 쓴 돈입니다. 기록에는 들어가지 않고, 맨 위 '쓸 수 있는 돈'에서 미리 빼서 보여줍니다.</p>
+      <div class="field"><label for="p1">무엇</label><input id="p1" value="${p?esc(p.name):''}" placeholder="예: 어머니 생일 선물"></div>
+      <div class="two">
+        <div class="field"><label for="p2">금액</label><input id="p2" class="money" inputmode="numeric" value="${p?p.amount.toLocaleString('ko-KR'):''}" placeholder="0"></div>
+        <div class="field"><label for="p3">날짜</label><input id="p3" type="date" value="${p?p.date:todayStr()}"></div>
+      </div>
+      <div class="field"><label for="p4">분류</label><select id="p4">${CATS.map(c=>`<option ${p&&p.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
+      <div class="field"><label>반복</label><div class="seg" id="prep">
+        <button type="button" data-v="" aria-pressed="${!p||!p.repeat}">한 번만</button>
+        <button type="button" data-v="yearly" aria-pressed="${!!(p&&p.repeat==='yearly')}">매년</button>
+        <button type="button" data-v="monthly" aria-pressed="${!!(p&&p.repeat==='monthly')}">매달</button>
+      </div><div class="note">생일이나 세금처럼 되풀이되는 건 매년으로 두세요. 썼음을 누르면 다음 회차 날짜로 자동으로 넘어갑니다.</div></div>
+      <div class="err" id="err"></div>
+      <div class="mfoot"><span></span><span class="right">
+        <button class="act" id="cancel">취소</button><button class="act primary" id="ok">${p?'저장':'추가'}</button>
+      </span></div>`;
+    let rep_ = p? (p.repeat||'') : '';
+    m.querySelectorAll('#prep button').forEach(b=>b.onclick=()=>{rep_=b.dataset.v;m.querySelectorAll('#prep button').forEach(x=>x.setAttribute('aria-pressed',x===b));});
+    moneyInput($('#p2')); $('#p1').focus();
+    $('#ok').onclick=()=>{
+      const name=$('#p1').value.trim(); if(!name){$('#err').textContent='무엇에 쓸 돈인지 적어 주세요.';return;}
+      const amount=parseMoney($('#p2')); if(!amount){$('#err').textContent='금액을 입력해 주세요.';return;}
+      const date = $('#p3').value||todayStr();
+      const rec={ name, amount, date, category:$('#p4').value, repeat:rep_, anchor:Number(date.slice(8)) };
+      if(!S.plans) S.plans=[];
+      if(p) Object.assign(p, rec); else S.plans.push(Object.assign({id:uid()}, rec));
+      closeModal(); commit(p?'예정 지출을 저장했습니다.':'예정 지출을 넣었습니다.');
     };
   }
 
