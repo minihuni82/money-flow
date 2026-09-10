@@ -1590,15 +1590,21 @@ function guessCardId(label){
   return score >= 2 ? best : '';
 }
 
-/** 가져온 내역을 카드·월 단위로 묶는다 */
+/** 가져온 내역을 불러온 묶음 단위로 모은다.
+    배치 표시가 없는 예전 기록은 카드·월·승인번호 유무로 갈라 준다 */
 function importGroups(){
   const g = {};
   S.txns.filter(t=>t.src==='import' && t.type==='expense').forEach(t=>{
-    const k = (t.cardId||'none')+'|'+monthOf(t.date);
-    if(!g[k]) g[k] = { cardId:t.cardId||'', ym:monthOf(t.date), ids:[], sum:0 };
-    g[k].ids.push(t.id); g[k].sum += t.amount;
+    const k = t.batch ? 'b:'+t.batch
+                      : 'o:'+(t.cardId||'none')+'|'+monthOf(t.date)+'|'+(t.approval?'ap':'no');
+    if(!g[k]) g[k] = { key:k, cardId:t.cardId||'', file:t.file||'', at:t.at||'', ids:[], sum:0, months:new Set(), names:[] };
+    const x = g[k];
+    x.ids.push(t.id); x.sum += t.amount; x.months.add(monthOf(t.date));
+    if(x.names.length < 3 && t.memo) x.names.push(t.memo.split(' (')[0]);
   });
-  return Object.values(g).sort((a,b)=> a.ym<b.ym?1 : a.ym>b.ym?-1 : 0);
+  return Object.values(g).map(x=>({
+    ...x, ym:[...x.months].sort().join(', ')
+  })).sort((a,b)=> a.ym<b.ym?1 : a.ym>b.ym?-1 : 0);
 }
 
 function existingKeys(){
@@ -1652,7 +1658,8 @@ function tidyModal(){
       const c = S.cards.find(x=>x.id===g.cardId);
       return `
       <div class="field" style="border-top:1px solid var(--rule-soft);padding-top:12px">
-        <label>${g.ym.replace('-','.')} · ${c?esc(c.name):'<span style="color:var(--out)">카드 없음</span>'} · ${g.ids.length}건 · ${won(g.sum)}</label>
+        <label>${esc(g.ym)} · ${c?esc(c.name):'<span style="color:var(--out)">카드 없음</span>'} · ${g.ids.length}건 · ${won(g.sum)}</label>
+        <div class="note" style="margin:0 0 7px">${g.file?esc(g.file)+' · ':''}${esc(g.names.join(', '))}${g.ids.length>3?' …':''}</div>
         <div class="prow" style="grid-template-columns:1fr auto auto;border:0;padding:0;gap:6px">
           <select data-move="${i}">
             <option value="">옮길 카드 고르기</option>
@@ -1678,7 +1685,7 @@ function tidyModal(){
   });
   m.querySelectorAll('[data-dropgroup]').forEach(b=>b.onclick=()=>{
     const g = groups[+b.dataset.dropgroup];
-    if(!confirm(`${g.ym.replace('-','.')} ${g.ids.length}건(${won(g.sum)})을 지울까요? 같은 파일을 다시 불러올 수 있습니다.`)) return;
+    if(!confirm(`${g.ym} ${g.ids.length}건(${won(g.sum)})을 지울까요? 같은 파일을 다시 불러올 수 있습니다.`)) return;
     const set = new Set(g.ids);
     S.txns.filter(t=>set.has(t.id)).forEach(t=>{ if(t.key && S.autoLog) delete S.autoLog[t.key]; });
     S.txns = S.txns.filter(t=>!set.has(t.id));
@@ -1777,6 +1784,7 @@ function previewModal(parsed, fname){
     if(!chosen.length){ $('#err').textContent='넣을 항목을 하나 이상 골라 주세요.'; return; }
     const fixedCard = single ? $('#c0').value : null;
     const rules = Object.assign({}, S.rules || {});
+    const batch = uid(), at = todayStr();
     let added = 0, skipped = 0;
     chosen.forEach(r=>{
       const cardId = single ? fixedCard : map[r.cardLabel];
@@ -1784,7 +1792,8 @@ function previewModal(parsed, fname){
       const memo = r.merchant + (r.inst? ' (할부 '+r.inst+')' : '') + (r.disc? ' (할인 '+r.disc.toLocaleString('ko-KR')+')' : '');
       S.txns.push({
         id:uid(), seq:Date.now()+added, type:'expense', amount:r.amount, date:r.date,
-        category:r.category, memo, cardId, key:r.key, approval:r.approval||'', src:'import'
+        category:r.category, memo, cardId, key:r.key, approval:r.approval||'', src:'import',
+        batch, file:fname, at
       });
       if(r.changed && r.merchant) rules[r.merchant] = r.category;
       added++;
