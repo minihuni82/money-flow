@@ -575,6 +575,13 @@ function render(){
       </div>`;
   };
 
+  const cardUse = S.cards.map(c=>{
+    const rows = mTx.filter(t=>t.type==='expense' && t.cardId===c.id);
+    return { c, sum: rows.reduce((s,t)=>s+t.amount,0), n: rows.length };
+  }).filter(u=>u.n > 0);
+  const cardUseTotal = cardUse.reduce((s,u)=>s+u.sum,0);
+  const cashOut = mTx.filter(t=>t.type==='expense' && !t.cardId).reduce((s,t)=>s+t.amount,0);
+
   const autoRows = [];
   let autoMonthly = 0;
   S.accounts.filter(a=>isParked(a) && a.monthly>0 && a.payDay && a.fromId).forEach(a=>{
@@ -660,6 +667,15 @@ function render(){
           </span>
         </div>`;}).join('') : `<div class="hint">등록된 카드가 없습니다.</div>`}
       <button class="addlink" data-open="card">카드 추가</button>
+      ${cardUse.length?`
+        <div class="subhead"><span>${Number(month.slice(5))}월 카드 사용</span><span class="num">${won(cardUseTotal)}</span></div>
+        ${cardUse.map(u=>`
+          <div class="row">
+            <span class="name"><span class="t">${esc(u.c.name)}</span><span class="s">${u.n}건${u.c.type==='credit'?'':' · 통장에서 바로 출금'}</span></span>
+            <span class="amt num">${won(u.sum)}</span>
+          </div>`).join('')}
+        ${cashOut?`<div class="row"><span class="name"><span class="t" style="color:var(--ink-soft)">통장·현금 지출</span><span class="s">카드 아님</span></span><span class="amt num" style="color:var(--ink-soft)">${won(cashOut)}</span></div>`:''}
+      `:''}
     </div>
   </div>
 
