@@ -453,8 +453,69 @@ function autoNextLabel(day, shift){
   return p ? dateLabel(p.date) + (p.shifted ? ' 주말 밀림' : '') : '';
 }
 
+const LUNAR = {
+  2026:"021703190417051706150714081309111011110912090108090990909000",
+  2027:"020703080407050606050704080209010930102911281228909099099000",
+  2028:"012702250326042505240722082009191018111612160115900909099009",
+  2029:"021303150414051306120712081009081008110612050104009009909900",
+  2030:"020303040403050206010701073008290927102711251225909009090909",
+  2031:"012302220323052106200719081809171016111512140113090090090909",
+  2032:"021103120410050906080707080609051004110312030101099090090090",
+  2033:"013103010331042905280627072608250923102311220120909909090000",
+  2034:"021903200419051806160716081409131012111112110110909909090009",
+  2035:"020803100408050806060705080409021001103111301229090990990090",
+  2036:"012802270328042605260624082209201019111812180116009099990090",
+  2037:"021503170416051506140713081109101009110712070105009099099090",
+  2038:"020403060405050406030702080108300929102811261226009090909909",
+  2039:"012402230325042305230721082009181018111612160114009000909099",
+  2040:"021203130411051106100709080809071006110512040103090090090909",
+  2041:"020103030401043005300628072808270925102511241223099090090090",
+  2042:"012202200420051906180717081609141014111312120111909090900900",
+  2043:"021003110410050906070707080509031003110212011231909909900900",
+  2044:"013002290329042805270625072509211021111912190118090990909000",
+  2045:"021703190417051706150714081309111010110912080107090990990900",
+  2046:"020603080406050606050704080209010930102911281227090099099090"
+};
+
+/* ══ 음력 ═══════════════════════════════════════════════
+   한국천문연구원 기준으로 뽑은 변환표. 2026~2045년까지 쓸 수 있다.
+   각 해의 값은 음력 1~12월 1일의 양력 MMDD 12개 + 그 달의 일수(0=30일, 9=29일) 12개.
+   윤달은 다루지 않는다. 윤달에 태어난 경우도 평달로 쇠는 것이 관례다. */
+const LUNAR_MONTHS = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+
+/** 음력 → 양력 'YYYY-MM-DD'. 없는 날짜(29일까지인 달의 30일)는 그 달 말일로 맞춘다 */
+function lunarToSolar(ly, lm, ld){
+  const row = LUNAR[ly];
+  if(!row || lm < 1 || lm > 12) return null;
+  const mm = Number(row.slice((lm-1)*4, (lm-1)*4+2));
+  const dd = Number(row.slice((lm-1)*4+2, (lm-1)*4+4));
+  // 달이 앞 달보다 작아지는 지점에서 양력 해가 넘어간다
+  let y = ly, prev = 0;
+  for(let i=0;i<lm;i++){
+    const m = Number(row.slice(i*4, i*4+2));
+    if(i > 0 && m < prev) y++;
+    prev = m;
+  }
+  const len = row.charAt(48 + (lm-1)) === '9' ? 29 : 30;
+  const d = new Date(y, mm-1, dd);
+  d.setDate(d.getDate() + Math.min(ld, len) - 1);
+  return ymd(d);
+}
+/** 오늘 이후로 가장 가까운 음력 기념일의 양력 날짜 */
+function nextLunar(lm, ld, after){
+  const from = after || todayStr();
+  const y0 = Number(from.slice(0,4));
+  for(let y=y0; y<=y0+6; y++){
+    const s = lunarToSolar(y, lm, ld);
+    if(s && s > from) return s;
+  }
+  return null;
+}
+const lunarLabel = p => p.lunar ? '음력 '+p.lunar.m+'.'+p.lunar.d : '';
+
 /** 반복 예정 지출의 다음 회차 날짜. 오늘보다 뒤가 될 때까지 넘긴다 */
-function rollPlanDate(dateStr, repeat, anchor){
+function rollPlanDate(dateStr, repeat, anchor, lunar){
+  if(repeat==='lunar' && lunar) return nextLunar(lunar.m, lunar.d, dateStr);
   if(!repeat) return null;
   let [Y,M,D] = dateStr.split('-').map(Number);
   D = anchor || D;                                     // 31일·2월 29일이 앞선 달에 밀려 굳지 않도록 원래 날짜 기준
@@ -600,7 +661,7 @@ function render(){
   const cardUse = S.cards.map(c=>{
     const rows = mTx.filter(t=>t.type==='expense' && t.cardId===c.id);
     return { c, sum: rows.reduce((s,t)=>s+t.amount,0), n: rows.length };
-  }).filter(u=>u.n > 0);
+  });
   const cardUseTotal = cardUse.reduce((s,u)=>s+u.sum,0);
   const cashOut = mTx.filter(t=>t.type==='expense' && !t.cardId).reduce((s,t)=>s+t.amount,0);
 
@@ -693,12 +754,12 @@ function render(){
           </span>
         </div>`;}).join('') : `<div class="hint">등록된 카드가 없습니다.</div>`}
       <button class="addlink" data-open="card">카드 추가</button>
-      ${cardUse.length?`
+      ${cardUse.some(u=>u.n>0)||cashOut?`
         <div class="subhead"><span>${Number(month.slice(5))}월 카드 사용</span><span class="num">${won(cardUseTotal)}</span></div>
         ${cardUse.map(u=>`
           <div class="row">
-            <span class="name"><span class="t">${esc(u.c.name)}</span><span class="s">${u.n}건${u.c.type==='credit'?'':' · 통장에서 바로 출금'}</span></span>
-            <span class="amt num">${won(u.sum)}</span>
+            <span class="name" style="${u.n?'':'opacity:.5'}"><span class="t">${esc(u.c.name)}</span><span class="s">${u.n}건${u.c.type==='credit'?'':' · 통장에서 바로 출금'}</span></span>
+            <span class="amt num" style="${u.n?'':'opacity:.5'}">${won(u.sum)}</span>
           </div>`).join('')}
         ${cashOut?`<div class="row"><span class="name"><span class="t" style="color:var(--ink-soft)">통장·현금 지출</span><span class="s">카드 아님</span></span><span class="amt num" style="color:var(--ink-soft)">${won(cashOut)}</span></div>`:''}
       `:''}
@@ -720,8 +781,8 @@ function render(){
       const dd = Math.round((new Date(p.date+'T00:00:00') - startOfToday())/86400000);
       return `
       <div class="row">
-        <span class="name"><span class="t">${esc(p.name)}${p.repeat?` <span class="tag">${p.repeat==='yearly'?'매년':'매달'}</span>`:''}${late?' <span class="tag" style="color:var(--out);border-color:var(--out)">지난 날짜</span>':''}</span>
-          <span class="s">${p.date.slice(5).replace('-','.')} · ${late? Math.abs(dd)+'일 지남' : dd===0?'오늘':dd+'일 뒤'}${p.category?' · '+esc(p.category):''}</span></span>
+        <span class="name"><span class="t">${esc(p.name)}${p.repeat?` <span class="tag">${p.repeat==='lunar'?'음력 매년':p.repeat==='yearly'?'매년':'매달'}</span>`:''}${late?' <span class="tag" style="color:var(--out);border-color:var(--out)">지난 날짜</span>':''}</span>
+          <span class="s">${p.lunar?lunarLabel(p)+' · ':''}${p.date.slice(5).replace('-','.')} · ${late? Math.abs(dd)+'일 지남' : dd===0?'오늘':dd+'일 뒤'}${p.category?' · '+esc(p.category):''}</span></span>
         <span class="amt num">${won(p.amount)}</span>
         <span class="tools">
           <button class="icon" data-done-plan="${p.id}">썼음</button>
@@ -798,7 +859,7 @@ function bind(){
   });
   document.querySelectorAll('[data-skip-plan]').forEach(b=>b.onclick=()=>{
     const p=(S.plans||[]).find(v=>v.id===b.dataset.skipPlan); if(!p) return;
-    const next=rollPlanDate(p.date,p.repeat,p.anchor);
+    const next=rollPlanDate(p.date,p.repeat,p.anchor,p.lunar);
     if(!next){ toast('다음 날짜를 계산할 수 없습니다.'); return; }
     p.date=next; commit(`다음은 ${next.replace(/-/g,'.')}입니다.`);
   });
@@ -1027,7 +1088,7 @@ function openForm(kind, ctx={}){
       let rolled = null;
       if(ctx.plan){
         const cur=(S.plans||[]).find(v=>v.id===ctx.plan.id);
-        const next = cur && cur.repeat ? rollPlanDate(cur.date, cur.repeat, cur.anchor) : null;
+        const next = cur && cur.repeat ? rollPlanDate(cur.date, cur.repeat, cur.anchor, cur.lunar) : null;
         if(cur && next){ cur.date = next; rolled = next; }
         else S.plans=(S.plans||[]).filter(v=>v.id!==ctx.plan.id);
       }
@@ -1110,12 +1171,27 @@ function openForm(kind, ctx={}){
       <h3>${p?'예정 지출 수정':'예정 지출 추가'}</h3>
       <p class="sub">아직 안 쓴 돈입니다. 기록에는 들어가지 않고, 맨 위 '쓸 수 있는 돈'에서 미리 빼서 보여줍니다.</p>
       <div class="field"><label for="p1">무엇</label><input id="p1" value="${p?esc(p.name):''}" placeholder="예: 어머니 생일 선물"></div>
-      <div class="two">
-        <div class="field"><label for="p2">금액</label><input id="p2" class="money" inputmode="numeric" value="${p?p.amount.toLocaleString('ko-KR'):''}" placeholder="0"></div>
-        <div class="field"><label for="p3">날짜</label><input id="p3" type="date" value="${p?p.date:todayStr()}"></div>
+      <div class="field"><label for="p2">금액</label><input id="p2" class="money" inputmode="numeric" value="${p?p.amount.toLocaleString('ko-KR'):''}" placeholder="0"></div>
+      <div class="field"><label>날짜 기준</label><div class="seg" id="pcal">
+        <button type="button" data-v="solar" aria-pressed="${!p||!p.lunar}">양력</button>
+        <button type="button" data-v="lunar" aria-pressed="${!!(p&&p.lunar)}">음력</button>
+      </div></div>
+      <div class="field" id="solarWrap"><label for="p3">날짜</label><input id="p3" type="date" value="${p&&!p.lunar?p.date:todayStr()}"></div>
+      <div id="lunarWrap">
+        <div class="two">
+          <div class="field"><label for="p5">음력 월</label><select id="p5">${LUNAR_MONTHS.map((t,i)=>`<option value="${i+1}" ${p&&p.lunar&&p.lunar.m===i+1?'selected':''}>${t}</option>`).join('')}</select></div>
+          <div class="field"><label for="p6">음력 일</label><select id="p6">${Array.from({length:30},(_,i)=>i+1).map(d=>`<option value="${d}" ${p&&p.lunar&&p.lunar.d===d?'selected':''}>${d}일</option>`).join('')}</select></div>
+        </div>
+        <div class="field">
+          <div class="seg">
+            <button type="button" class="icon" id="seol" style="border:1px solid var(--rule);border-radius:var(--r);padding:6px">설날</button>
+            <button type="button" class="icon" id="chuseok" style="border:1px solid var(--rule);border-radius:var(--r);padding:6px">추석</button>
+          </div>
+          <div class="note" id="lunarNote"></div>
+        </div>
       </div>
       <div class="field"><label for="p4">분류</label><select id="p4">${CATS.map(c=>`<option ${p&&p.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
-      <div class="field"><label>반복</label><div class="seg" id="prep">
+      <div class="field" id="repWrap"><label>반복</label><div class="seg" id="prep">
         <button type="button" data-v="" aria-pressed="${!p||!p.repeat}">한 번만</button>
         <button type="button" data-v="yearly" aria-pressed="${!!(p&&p.repeat==='yearly')}">매년</button>
         <button type="button" data-v="monthly" aria-pressed="${!!(p&&p.repeat==='monthly')}">매달</button>
@@ -1125,13 +1201,41 @@ function openForm(kind, ctx={}){
         <button class="act" id="cancel">취소</button><button class="act primary" id="ok">${p?'저장':'추가'}</button>
       </span></div>`;
     let rep_ = p? (p.repeat||'') : '';
+    let cal = p && p.lunar ? 'lunar' : 'solar';
     m.querySelectorAll('#prep button').forEach(b=>b.onclick=()=>{rep_=b.dataset.v;m.querySelectorAll('#prep button').forEach(x=>x.setAttribute('aria-pressed',x===b));});
+    const syncCal=()=>{
+      const isL = cal==='lunar';
+      $('#solarWrap').style.display = isL?'none':'block';
+      $('#lunarWrap').style.display = isL?'block':'none';
+      $('#repWrap').style.display = isL?'none':'block';        // 음력은 해마다 반복이 기본
+      if(isL){
+        rep_ = 'lunar';
+        const lm=Number($('#p5').value), ld=Number($('#p6').value);
+        const next=nextLunar(lm,ld);
+        $('#lunarNote').innerHTML = next
+          ? `다음은 양력 <b>${next.replace(/-/g,'.')}</b>(${WD[new Date(next+'T00:00:00').getDay()]}) 입니다. 해마다 음력 날짜로 다시 계산합니다.`
+          : '날짜를 계산할 수 없습니다.';
+      }else if(rep_==='lunar') rep_='yearly';
+    };
+    m.querySelectorAll('#pcal button').forEach(b=>b.onclick=()=>{cal=b.dataset.v;m.querySelectorAll('#pcal button').forEach(x=>x.setAttribute('aria-pressed',x===b));syncCal();});
+    $('#p5').onchange=syncCal; $('#p6').onchange=syncCal;
+    $('#seol').onclick=()=>{ $('#p5').value='1'; $('#p6').value='1'; if(!$('#p1').value) $('#p1').value='설날'; syncCal(); };
+    $('#chuseok').onclick=()=>{ $('#p5').value='8'; $('#p6').value='15'; if(!$('#p1').value) $('#p1').value='추석'; syncCal(); };
+    syncCal();
     moneyInput($('#p2')); $('#p1').focus();
     $('#ok').onclick=()=>{
       const name=$('#p1').value.trim(); if(!name){$('#err').textContent='무엇에 쓸 돈인지 적어 주세요.';return;}
       const amount=parseMoney($('#p2')); if(!amount){$('#err').textContent='금액을 입력해 주세요.';return;}
-      const date = $('#p3').value||todayStr();
-      const rec={ name, amount, date, category:$('#p4').value, repeat:rep_, anchor:Number(date.slice(8)) };
+      let rec;
+      if(cal==='lunar'){
+        const lm=Number($('#p5').value), ld=Number($('#p6').value);
+        const next=nextLunar(lm,ld);
+        if(!next){ $('#err').textContent='그 음력 날짜는 계산할 수 없습니다.'; return; }
+        rec={ name, amount, date:next, category:$('#p4').value, repeat:'lunar', lunar:{m:lm,d:ld}, anchor:0 };
+      }else{
+        const date = $('#p3').value||todayStr();
+        rec={ name, amount, date, category:$('#p4').value, repeat:rep_, anchor:Number(date.slice(8)), lunar:null };
+      }
       if(!S.plans) S.plans=[];
       if(p) Object.assign(p, rec); else S.plans.push(Object.assign({id:uid()}, rec));
       closeModal(); commit(p?'예정 지출을 저장했습니다.':'예정 지출을 넣었습니다.');
@@ -1473,6 +1577,30 @@ function extract(grid){
   return { rows, stated, zeroSkipped, cancelled, discountSum, checkSum, usedPrincipal:useP };
 }
 
+/** 명세서의 카드 이름과 등록한 카드를 두 글자 단위로 견줘 본다. 확실할 때만 고른다 */
+function guessCardId(label){
+  const norm = t => String(t).replace(/[\s()\-_·]/g,'').toLowerCase();
+  const L = norm(label);
+  let best = '', score = 0;
+  S.cards.forEach(c=>{
+    const N = norm(c.name); let sc = 0;
+    for(let i=0;i<N.length-1;i++) if(L.includes(N.slice(i,i+2))) sc++;
+    if(sc > score){ score = sc; best = c.id; }
+  });
+  return score >= 2 ? best : '';
+}
+
+/** 가져온 내역을 카드·월 단위로 묶는다 */
+function importGroups(){
+  const g = {};
+  S.txns.filter(t=>t.src==='import' && t.type==='expense').forEach(t=>{
+    const k = (t.cardId||'none')+'|'+monthOf(t.date);
+    if(!g[k]) g[k] = { cardId:t.cardId||'', ym:monthOf(t.date), ids:[], sum:0 };
+    g[k].ids.push(t.id); g[k].sum += t.amount;
+  });
+  return Object.values(g).sort((a,b)=> a.ym<b.ym?1 : a.ym>b.ym?-1 : 0);
+}
+
 function existingKeys(){
   const set = new Set();
   S.txns.forEach(t=>{
@@ -1495,9 +1623,13 @@ function importModal(){
       <div class="note">현대카드 웹에서 내려받은 파일(.xls)과 일반 CSV·엑셀을 읽습니다.</div>
     </div>
     <div class="err" id="err"></div>
-    <div class="mfoot"><span></span><span class="right"><button class="act" id="cancel">닫기</button></span></div>`;
+    <div class="mfoot">
+      ${importGroups().length?`<button class="act quiet" id="tidy">가져온 내역 정리</button>`:'<span></span>'}
+      <span class="right"><button class="act" id="cancel">닫기</button></span>
+    </div>`;
   $('#veil').classList.add('open');
   $('#cancel').onclick = closeModal;
+  if($('#tidy')) $('#tidy').onclick = tidyModal;
   $('#file').onchange = async e=>{
     const f = e.target.files[0]; if(!f) return;
     $('#err').textContent = '읽는 중…';
@@ -1508,13 +1640,59 @@ function importModal(){
   };
 }
 
+/** 잘못된 카드로 들어간 내역을 옮기거나 한 번에 지운다 */
+function tidyModal(){
+  const m = $('#modal');
+  m.classList.remove('wide');
+  const groups = importGroups();
+  m.innerHTML = `
+    <h3>가져온 내역 정리</h3>
+    <p class="sub">명세서로 들어온 내역을 카드와 월 단위로 묶었습니다. 카드가 잘못 연결됐으면 옮기고, 잘못 불러왔으면 묶음째 지우세요.</p>
+    ${groups.map((g,i)=>{
+      const c = S.cards.find(x=>x.id===g.cardId);
+      return `
+      <div class="field" style="border-top:1px solid var(--rule-soft);padding-top:12px">
+        <label>${g.ym.replace('-','.')} · ${c?esc(c.name):'<span style="color:var(--out)">카드 없음</span>'} · ${g.ids.length}건 · ${won(g.sum)}</label>
+        <div class="prow" style="grid-template-columns:1fr auto auto;border:0;padding:0;gap:6px">
+          <select data-move="${i}">
+            <option value="">옮길 카드 고르기</option>
+            ${S.cards.filter(x=>x.id!==g.cardId).map(x=>`<option value="${x.id}">${esc(x.name)}(으)로 옮기기</option>`).join('')}
+          </select>
+          <button class="act" data-domove="${i}">옮기기</button>
+          <button class="act quiet" data-dropgroup="${i}" style="color:var(--out)">지우기</button>
+        </div>
+      </div>`;}).join('')}
+    <div class="err" id="err"></div>
+    <div class="mfoot"><button class="act quiet" id="back">불러오기로</button><span class="right"><button class="act" id="cancel">닫기</button></span></div>`;
+  $('#veil').classList.add('open');
+  $('#cancel').onclick = closeModal;
+  $('#back').onclick = importModal;
+  m.querySelectorAll('[data-domove]').forEach(b=>b.onclick=()=>{
+    const g = groups[+b.dataset.domove];
+    const to = m.querySelector(`[data-move="${b.dataset.domove}"]`).value;
+    if(!to){ $('#err').textContent = '옮길 카드를 골라 주세요.'; return; }
+    const set = new Set(g.ids);
+    S.txns.forEach(t=>{ if(set.has(t.id)) t.cardId = to; });
+    const c = S.cards.find(x=>x.id===to);
+    closeModal(); commit(`${g.ids.length}건을 ${c?c.name:'다른 카드'}로 옮겼습니다.`);
+  });
+  m.querySelectorAll('[data-dropgroup]').forEach(b=>b.onclick=()=>{
+    const g = groups[+b.dataset.dropgroup];
+    if(!confirm(`${g.ym.replace('-','.')} ${g.ids.length}건(${won(g.sum)})을 지울까요? 같은 파일을 다시 불러올 수 있습니다.`)) return;
+    const set = new Set(g.ids);
+    S.txns.filter(t=>set.has(t.id)).forEach(t=>{ if(t.key && S.autoLog) delete S.autoLog[t.key]; });
+    S.txns = S.txns.filter(t=>!set.has(t.id));
+    closeModal(); commit(`${g.ids.length}건을 지웠습니다.`);
+  });
+}
+
 function previewModal(parsed, fname){
   const m = $('#modal');
   m.classList.add('wide');
   const dup = existingKeys();
   const labels = [...new Set(parsed.rows.map(r=>r.cardLabel).filter(Boolean))];
   const map = Object.assign({}, S.cardMap || {});
-  labels.forEach(l=>{ if(!map[l]) map[l] = S.cards[0].id; });
+  labels.forEach(l=>{ if(map[l]===undefined) map[l] = guessCardId(l); });
   const single = !labels.length;
 
   parsed.rows.forEach((r,i)=>{ r.i=i; r.dup = dup.has(r.key); r.on = !r.dup; });
@@ -1533,11 +1711,13 @@ function previewModal(parsed, fname){
           <div class="prow" style="grid-template-columns:1fr 1fr;border:0;padding:4px 0">
             <span class="pm">${esc(l)}</span>
             <select data-map="${esc(l)}">
+              <option value="" ${!map[l]?'selected':''}>— 카드를 고르세요 —</option>
               ${S.cards.map(c=>`<option value="${c.id}" ${map[l]===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
-              <option value="">건너뛰기</option>
             </select>
           </div>`).join('')}
-        <div class="note">명세서의 카드 이름과 앱에 등록한 카드를 맞춰 주세요. 다음부터 기억합니다.</div>
+        <div class="note" style="${labels.some(l=>!map[l])?'color:var(--out)':''}">${labels.some(l=>!map[l])
+          ? '연결할 카드를 직접 골라 주세요. 건너뛰기로 두면 그 카드 내역은 들어가지 않습니다.'
+          : '명세서의 카드 이름과 앱에 등록한 카드를 맞춰 주세요. 다음부터 기억합니다.'}</div>
       </div>`}
     <div class="tally">
       <span><button type="button" class="icon" id="all" style="padding:0;border-bottom:1px solid var(--rule)">전체 선택</button>
