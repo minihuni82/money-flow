@@ -1,0 +1,19 @@
+{
+  "name": "통장 흐름",
+  "short_name": "통장흐름",
+  "description": "통장 잔액, 카드 결제 예정액, 계좌 이체를 한 화면에서 관리합니다.",
+  "lang": "ko",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#E9EDE4",
+  "theme_color": "#E9EDE4",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
