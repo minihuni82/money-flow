@@ -70,6 +70,7 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 .icon{background:none;border:0;padding:3px 5px;font-size:.78rem;color:var(--ink-soft);border-radius:3px}
 .icon:hover{background:var(--rule-soft);color:var(--ink)}
 
+.brk{font-size:.76rem;color:var(--ink-faint);padding:0 0 9px;margin-top:-6px;word-break:keep-all}
 .subhead{display:flex;justify-content:space-between;align-items:baseline;margin-top:16px;padding-top:9px;border-top:1px solid var(--rule);font-size:.85rem;color:var(--ink-soft)}
 .modal.wide{max-width:760px}
 .prev{max-height:44vh;overflow:auto;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);margin:4px 0 12px}
@@ -346,6 +347,43 @@ function cardDue(id){
 const isSaving = a => a.kind==='savings';
 /** 쓸 수 있는 돈에서 빼두는 통장: 적금과 '모아두는 통장'으로 표시한 계좌 */
 const isParked = a => a.kind==='savings' || !!a.parked;
+/** 카드 미결제액을 사용월별로 쪼갠다. 결제 기록은 오래된 달부터 지워 나간다 */
+function cardBuckets(c){
+  const byM = {};
+  if(c.opening) byM['0000-00'] = c.opening;            // 직접 입력한 금액은 가장 오래된 것으로 본다
+  S.txns.forEach(t=>{
+    if(t.type==='expense' && t.cardId===c.id){ const k=monthOf(t.date); byM[k]=(byM[k]||0)+t.amount; }
+  });
+  let paid = S.txns.filter(t=>t.type==='cardpay' && t.cardId===c.id).reduce((s,t)=>s+t.amount,0);
+  const out = [];
+  Object.keys(byM).sort().forEach(k=>{
+    let amt = byM[k];
+    if(paid > 0){ const use = Math.min(paid, amt); amt -= use; paid -= use; }
+    if(amt > 0.5) out.push({ ym:k, amount:amt });
+  });
+  return out;
+}
+const monthIndex = ym => { const [y,m]=ym.split('-').map(Number); return y*12+(m-1); };
+
+/** 그 달에 쓴 돈이 빠지는 날 = 다음 달 결제일 (주말이면 영업일로) */
+function billDateFor(ym, payDay){
+  if(ym==='0000-00' || !payDay) return null;
+  let [y,m] = ym.split('-').map(Number);
+  m++; if(m > 12){ m = 1; y++; }
+  const last = new Date(y, m, 0).getDate();
+  return shiftToWeekday(new Date(y, m-1, Math.min(payDay, last)));
+}
+/** 다음 결제일에 실제로 빠질 금액 = 그 결제월보다 앞선 사용월의 미결제 합 */
+function dueNow(c){
+  const p = nextPayDate(c.payDay);
+  if(!p) return cardDue(c.id);
+  const pm = p.date.getFullYear()*12 + p.date.getMonth();
+  return cardBuckets(c)
+    .filter(b=> b.ym==='0000-00' || monthIndex(b.ym) < pm)
+    .reduce((s,b)=>s+b.amount, 0);
+}
+const dueNowTotal = ()=> S.cards.filter(c=>c.type==='credit').reduce((s,c)=>s+dueNow(c), 0);
+
 const cashTotal   = ()=> S.accounts.filter(a=>!isParked(a)).reduce((s,a)=>s+accountBalance(a.id),0);
 const parkedTotal = ()=> S.accounts.filter(isParked).reduce((s,a)=>s+accountBalance(a.id),0);
 const dueTotal  = ()=> S.cards.filter(c=>c.type==='credit').reduce((s,c)=>s+cardDue(c.id),0);
@@ -562,7 +600,7 @@ function runAutos(){
       if(d > today) return;
       const key = 'auto:card:'+c.id+':'+ym;
       if(log[key]) return;
-      const due = cardDueAt(c.id, ymd(d));
+      const due = dueNow(c);                            // 그 결제일에 청구되는 몫만
       if(due <= 0){ log[key] = 'none'; return; }      // 낼 게 없으면 건너뛰고 기록만 남긴다
       put(key, { type:'cardpay', amount:due, cardId:c.id, accountId:c.accountId, date:ymd(d), memo:'자동 출금' });
     });
@@ -618,8 +656,10 @@ function render(){
   const cats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,6);
   const catMax = cats.length?cats[0][1]:1;
 
-  const months = [...new Set(S.txns.map(t=>monthOf(t.date)))].sort().reverse();
-  if(!months.includes(month)) months.unshift(month);
+  // 기록이 없는 달도 고를 수 있게 최근 12개월은 항상 넣는다
+  const recent = [];
+  for(let i=0;i<12;i++){ const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-i); recent.push(monthOf(ymd(d))); }
+  const months = [...new Set([...S.txns.map(t=>monthOf(t.date)), ...recent, month])].sort().reverse();
 
   let list = S.txns.slice().sort((a,b)=> a.date<b.date?1:a.date>b.date?-1:((a.seq||0)<(b.seq||0)?1:-1));
   if(filter!=='all') list = list.filter(t=>t.type===filter);
@@ -658,6 +698,7 @@ function render(){
   const plansSoon = plans.filter(p=>p.date<=limit);
   const plannedSum = plansSoon.reduce((s,p)=>s+p.amount,0);
 
+  const dueNowSum = dueNowTotal();
   const cardUse = S.cards.map(c=>{
     const rows = mTx.filter(t=>t.type==='expense' && t.cardId===c.id);
     return { c, sum: rows.reduce((s,t)=>s+t.amount,0), n: rows.length };
@@ -713,7 +754,7 @@ function render(){
     <span class="figure num ${free<0?'negative':''}">${won(free)}</span>
     <div class="equation num">
       <span>입출금·현금 <b>${won(cash)}</b></span><span class="op">−</span>
-      <span>카드 결제 예정 <b>${won(due)}</b></span>
+      <span>카드 미결제 전체 <b>${won(due)}</b></span>
     </div>
     ${saved?`<div class="equation num" style="margin-top:7px">
       <span class="op">따로</span><span>모아둔 돈 <b>${won(saved)}</b></span>
@@ -723,7 +764,10 @@ function render(){
       <span class="op">앞으로 ${HORIZON}일</span><span>예정 지출 <b>${won(plannedSum)}</b></span>
       <span class="op">→ 그래도 남는 돈</span><b style="${free-plannedSum<0?'color:var(--out)':''}">${won(free-plannedSum)}</b>
     </div>`:''}
-    ${free<0?`<div class="warn">카드 결제 예정액이 통장 잔액보다 ${won(-free)} 많습니다.</div>`:''}
+    ${dueNowSum?`<div class="equation num" style="margin-top:7px">
+      <span class="op">이 중</span><span>이번 결제일에 <b style="color:var(--due)">${won(dueNowSum)}</b></span>
+    </div>`:''}
+    ${free<0?`<div class="warn">카드 미결제액이 통장 잔액보다 ${won(-free)} 많습니다.</div>`:''}
     ${soon.length?`<div class="warn" style="color:var(--due)">결제일 임박 · ${esc(soon.join(' / '))}</div>`:''}
   </div>
 
@@ -738,7 +782,7 @@ function render(){
     </div>
 
     <div class="col">
-      <div class="colhead"><h2>카드 결제 예정</h2><span class="sum num" style="color:var(--due)">${won(due)}</span></div>
+      <div class="colhead"><h2>이번 결제일에 나갈 카드값</h2><span class="sum num" style="color:var(--due)">${won(dueNowSum)}</span></div>
       ${S.cards.length? S.cards.map(c=>{
         const d=cardDue(c.id), p=nextPayDate(c.payDay), n=daysToPay(c.payDay), acc=S.accounts.find(a=>a.id===c.accountId);
         return `
@@ -746,14 +790,22 @@ function render(){
           <span class="name"><span class="t">${esc(c.name)}</span><span class="s">${c.type==='credit'
             ? `${c.payDay?c.payDay+'일 결제':'결제일 미설정'}${p?` · ${dateLabel(p.date)}${p.shifted?' 주말 밀림':''} · ${n===0?'오늘':n+'일 뒤'}`:''}${acc?' · '+esc(acc.name):''}`
             : `체크카드${acc?' · '+esc(acc.name):''}`}</span></span>
-          <span class="amt num ${c.type==='credit'?'due':''}">${c.type==='credit'?won(d):'즉시 출금'}</span>
+          <span class="amt num ${c.type==='credit'?'due':''}">${c.type==='credit'?won(dueNow(c)):'즉시 출금'}</span>
           <span class="tools">
             ${c.type==='credit'&&d>0?`<button class="icon" data-pay="${c.id}">결제</button>`:''}
             <button class="icon" data-edit-card="${c.id}">수정</button>
             <button class="icon" data-del-card="${c.id}">삭제</button>
           </span>
-        </div>`;}).join('') : `<div class="hint">등록된 카드가 없습니다.</div>`}
+        </div>
+        ${c.type==='credit'? cardBuckets(c).map(b=>{
+          const bd = billDateFor(b.ym, c.payDay);
+          const np = nextPayDate(c.payDay);
+          const soonBill = bd && np && bd.getTime() <= np.date.getTime();
+          return `<div class="brk num" style="${soonBill?'color:var(--due)':''}">${
+            b.ym==='0000-00' ? '직접 입력한 금액' : Number(b.ym.slice(5))+'월 사용'
+          } ${won(b.amount)}${bd?' → '+dateLabel(bd)+' 결제':''}</div>`;}).join('') : ''}`;}).join('') : `<div class="hint">등록된 카드가 없습니다.</div>`}
       <button class="addlink" data-open="card">카드 추가</button>
+      ${due>dueNowSum?`<div class="brk num" style="padding-top:8px">아직 청구 안 된 사용분 ${won(due-dueNowSum)} 은 그다음 결제일 몫입니다</div>`:''}
       ${cardUse.some(u=>u.n>0)||cashOut?`
         <div class="subhead"><span>${Number(month.slice(5))}월 카드 사용</span><span class="num">${won(cardUseTotal)}</span></div>
         ${cardUse.map(u=>`
@@ -1136,8 +1188,11 @@ function openForm(kind, ctx={}){
       <h3>카드값 결제</h3>
       <p class="sub">결제 예정액을 통장에서 실제로 빼냅니다.</p>
       <div class="field"><label for="f2">카드</label><select id="f2">${credits.map(c=>`<option value="${c.id}" ${cur&&c.id===cur.id?'selected':''}>${esc(c.name)} · 예정 ${won(cardDue(c.id))}</option>`).join('')}</select></div>
-      <div class="field"><label for="f1">결제 금액</label><input id="f1" class="money" inputmode="numeric" value="${cur?Math.max(0,cardDue(cur.id)).toLocaleString('ko-KR'):''}">
-        <div class="note"><button type="button" class="icon" id="full" style="padding:0;border-bottom:1px solid var(--rule)">예정액 전액 넣기</button></div></div>
+      <div class="field"><label for="f1">결제 금액</label><input id="f1" class="money" inputmode="numeric" value="${cur?Math.max(0,dueNow(cur)).toLocaleString('ko-KR'):''}">
+        <div class="note">
+          <button type="button" class="icon" id="thisBill" style="padding:0;border-bottom:1px solid var(--rule)">이번 청구분</button>
+          · <button type="button" class="icon" id="full" style="padding:0;border-bottom:1px solid var(--rule)">미결제 전액</button>
+        </div></div>
       <div class="field"><label for="f3">출금 통장</label><select id="f3">${accOptions(cur?cur.accountId:null)}</select></div>
       <div class="field"><label for="f4">날짜</label><input id="f4" type="date" value="${todayStr()}">
         <div class="note" id="payNote"></div></div>
@@ -1146,17 +1201,22 @@ function openForm(kind, ctx={}){
         <button class="act" id="cancel">취소</button><button class="act primary" id="ok">결제 기록</button>
       </span></div>`;
     moneyInput($('#f1'));
+    const curCard = ()=> S.cards.find(x=>x.id===$('#f2').value);
     const syncCard=()=>{
-      const c=S.cards.find(x=>x.id===$('#f2').value);
-      $('#f1').value=Math.max(0,cardDue(c.id)).toLocaleString('ko-KR');
+      const c=curCard();
+      $('#f1').value=Math.max(0,dueNow(c)).toLocaleString('ko-KR');
       if(c.accountId) $('#f3').value=c.accountId;
       const p=nextPayDate(c.payDay);
-      $('#payNote').textContent = p
+      const rest = cardDue(c.id) - dueNow(c);
+      $('#payNote').innerHTML = (p
         ? `이번 결제 예정일 ${dateLabel(p.date)}${p.shifted?' — 원래 '+c.payDay+'일인데 주말이라 밀립니다':''}`
-        : '카드 수정에서 결제일을 넣으면 예정일을 알려줍니다.';
+        : '카드 수정에서 결제일을 넣으면 예정일을 알려줍니다.')
+        + (rest>0? `<br>이번 달 사용분 ${won(rest)} 은 다음 결제일 몫이라 빼뒀습니다.` : '');
     };
     syncCard();
-    $('#f2').onchange=syncCard; $('#full').onclick=syncCard;
+    $('#f2').onchange=syncCard;
+    $('#thisBill').onclick=()=>{ $('#f1').value=Math.max(0,dueNow(curCard())).toLocaleString('ko-KR'); };
+    $('#full').onclick=()=>{ $('#f1').value=Math.max(0,cardDue(curCard().id)).toLocaleString('ko-KR'); };
     $('#ok').onclick=()=>{
       const amt=parseMoney($('#f1')); if(!amt){$('#err').textContent='금액을 입력해 주세요.';return;}
       const date=$('#f4').value||todayStr();
@@ -1403,6 +1463,8 @@ function parseDate(v, fallbackYear){
   let m = s.match(/(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
   if(!m) m = s.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
   if(m) return m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0');
+  m = s.match(/^(\d{2})[-./](\d{1,2})[-./](\d{1,2})$/);          // 26.08.03 같은 두 자리 연도
+  if(m) return '20'+m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0');
   m = s.match(/^(\d{1,2})[-./](\d{1,2})$/);
   if(m && fallbackYear) return fallbackYear+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');
   m = s.match(/^(\d{8})$/);
@@ -1470,7 +1532,7 @@ const COLS = {
   date:      [/이용일자?/, /거래일자?/, /승인일자?/, /사용일자?/, /매출일자?/, /^일자$/],
   merchant:  [/이용하신\s*곳/, /이용가맹점/, /가맹점명/, /이용처|사용처/, /이용내역|사용내역/, /적요|내용|상호/, /가맹점/],
   amount:    [/국내이용금액/, /이용금액/, /승인금액/, /거래금액/, /사용금액/, /^금액/],
-  principal: [/결제원금/, /청구원금/, /청구금액/],
+  principal: [/결제원금/, /청구원금/, /청구금액/, /결제금액[\s\S]*원금/, /^원금$/],
   fee:       [/수수료/],
   discount:  [/할인금액/, /즉시할인/],
   card:      [/이용카드명/, /이용카드/, /카드명/, /카드종류/],
@@ -1518,14 +1580,19 @@ function statedTotals(pre){
 
 /** 표에서 열 위치를 찾아 거래 목록을 뽑아낸다 */
 function extract(grid){
-  let hi = -1, col = null;
+  let hi = -1, col = null, span = 1;
   for(let i=0;i<Math.min(grid.length,40);i++){
     const r = grid[i];
     if(r.length < 3) continue;
-    const c = findCols(r);
+    // 국민카드 명세서처럼 '이번달 결제금액 / 원금·수수료' 두 줄 헤더면 합쳐서 본다
+    const nxt = grid[i+1] || [];
+    const twoRow = nxt.length && !parseDate(nxt[0]) && !parseDate(nxt[1]) &&
+                   nxt.some(c=>c && /원금|수수료|국내|해외/.test(c));
+    const merged = twoRow ? r.map((c,j)=>[c, nxt[j]||''].filter(Boolean).join(' ').trim()) : r;
+    const c = findCols(merged);
     if(c.date < 0) continue;
     if(c.merchant < 0 && c.amount < 0) continue;
-    hi = i; col = c; break;
+    hi = i; col = c; span = twoRow ? 2 : 1; break;
   }
   if(hi < 0) throw new Error('날짜·가맹점·금액 열을 찾지 못했습니다. 다른 형식으로 내려받아 보세요.');
 
@@ -1538,12 +1605,14 @@ function extract(grid){
   const rows = [];
   let zeroSkipped = 0, cancelled = 0, discountSum = 0, checkSum = 0;
 
-  for(let i=hi+1;i<grid.length;i++){
+  for(let i=hi+span;i<grid.length;i++){
     const r = grid[i];
     const label = col.merchant>=0 ? String(r[col.merchant]||'') : '';
+    const line = r.join(' ');
 
-    if(/총\s*합\s*계/.test(label)){                      // 현대카드식 합계 행
-      const m = label.match(/(\d[\d,]*)\s*건/);
+    // 합계 행 — '총 합계'(현대), '합   계    64 건'(국민) 모두 잡는다. '소계'는 제외
+    if(/합\s*계/.test(line) && !/소\s*계/.test(line)){
+      const m = line.match(/(\d[\d,]*)\s*건/);
       stated = { amount: useP ? numOf(r[col.principal]) + (col.fee>=0?numOf(r[col.fee]):0) : numOf(r[col.amount]),
                  count: m ? numOf(m[1]) : null };
       continue;
