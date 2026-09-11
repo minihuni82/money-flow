@@ -9,6 +9,11 @@
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="통장 흐름">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -50,11 +55,14 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 .tab:hover{color:var(--ink)}
 .tab[aria-pressed="true"]{color:var(--ink);font-weight:500;border-bottom-color:var(--ink)}
 .tab .n{font-size:.78rem;color:var(--ink-faint);margin-left:4px}
-.dash[data-tab] .panel{display:none}
+.stack{display:grid;gap:14px;align-content:start}
+.dash[data-tab] .panel,.dash[data-tab] .stack{display:none}
 .dash[data-tab="home"] .panel[data-t~="home"],
 .dash[data-tab="give"] .panel[data-t~="give"],
 .dash[data-tab="plan"] .panel[data-t~="plan"],
 .dash[data-tab="log"]  .panel[data-t~="log"]{display:block}
+.dash[data-tab="home"] .stack[data-t~="home"],
+.dash[data-tab="give"] .stack[data-t~="give"]{display:grid}
 .dash{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px;align-items:start}
 .panel{background:var(--sheet);border:1px solid var(--rule);border-radius:6px;padding:15px 17px}
 .panel.span2{grid-column:span 2}
@@ -216,6 +224,7 @@ footer button:hover{border-color:var(--ink);color:var(--ink)}
       <button id="btnSetup">동기화 설정</button>
       <button id="btnBackup">백업·복원</button>
       <button id="btnExport">CSV 내보내기</button>
+      <button id="btnInstall" style="display:none">앱으로 설치</button>
     </span>
   </footer>
 </div>
@@ -864,9 +873,12 @@ function render(){
       </div>`:''}
       ${!gv.income?`<div class="brk">기준 기간에 수입 기록이 없어 십일조는 0원입니다.</div>`:''}
       <div class="seg" style="margin-top:11px">
-        <button class="act" data-give="1" style="flex:1">기록하기</button>
+        ${gv.left>0
+          ? `<button class="act primary" data-give-cash="1" style="flex:1">현금에서 드렸음 ${won(gv.left)}</button>`
+          : `<button class="act" data-give-cash="1" style="flex:1" title="같은 금액을 한 번 더 기록합니다">다 드렸습니다</button>`}
         <button class="act quiet" data-open="offering" style="flex:1">항목 수정</button>
       </div>
+      <div class="brk" style="padding-top:7px"><button type="button" class="icon" data-give="1" style="padding:0;border-bottom:1px solid var(--rule)">현금 아닌 다른 수단으로 기록</button></div>
     </div>`;
   const evs = upcoming(7);
   const evSum = evs.reduce((s,e)=>s+e.amount,0);
@@ -976,16 +988,8 @@ function render(){
 
   <div class="dash" data-tab="${tab}">
     ${evPanel}
+    <div class="stack" data-t="home give">
     ${tithePanel}
-    <div class="panel" data-t="home">
-      <div class="colhead"><h2>입출금·현금</h2><span class="sum num">${won(cash)}</span></div>
-      ${spend.length? spend.map(accRow).join('') : `<div class="hint">등록된 입출금 통장이 없습니다.</div>`}
-      ${savings.length?`
-        <div class="subhead"><span>모아둔 돈</span><span class="num">${won(saved)}</span></div>
-        ${savings.map(accRow).join('')}`:''}
-      <button class="addlink" data-open="account">통장 추가</button>
-    </div>
-
     <div class="panel" data-t="home card">
       <div class="colhead"><h2>이번 결제일에 나갈 카드값</h2><span class="sum num" style="color:var(--due)">${won(dueNowSum)}</span></div>
       ${S.cards.length? S.cards.map(c=>{
@@ -1020,7 +1024,15 @@ function render(){
         ${cashOut?`<div class="row"><span class="name"><span class="t" style="color:var(--ink-soft)">통장·현금 지출</span><span class="s">카드 아님</span></span><span class="amt num" style="color:var(--ink-soft)">${won(cashOut)}</span></div>`:''}
       `:''}
     </div>
-
+    </div>
+    <div class="panel" data-t="home">
+      <div class="colhead"><h2>입출금·현금</h2><span class="sum num">${won(cash)}</span></div>
+      ${spend.length? spend.map(accRow).join('') : `<div class="hint">등록된 입출금 통장이 없습니다.</div>`}
+      ${savings.length?`
+        <div class="subhead"><span>모아둔 돈</span><span class="num">${won(saved)}</span></div>
+        ${savings.map(accRow).join('')}`:''}
+      <button class="addlink" data-open="account">통장 추가</button>
+    </div>
 
   <div class="panel span2" data-t="give">
     <div class="sechead"><h2>헌금 기록</h2><span class="num" style="font-size:.85rem;color:var(--ink-soft)">올해 ${won(S.txns.filter(t=>t.type==='expense'&&t.category==='헌금'&&t.date.startsWith(todayStr().slice(0,4))).reduce((s,t)=>s+t.amount,0))}</span></div>
@@ -1118,6 +1130,24 @@ function bind(){
   });
   document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;render();});
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>openForm('cardpay',{cardId:b.dataset.pay}));
+  document.querySelectorAll('[data-give-cash]').forEach(b=>b.onclick=()=>{
+    const g = sundayGiving();
+    const amt = g.left > 0 ? g.left : g.total;
+    if(!amt){ toast('드릴 금액이 0원입니다.'); return; }
+    let cash = S.accounts.find(a=>a.kind==='cash');
+    if(!cash){                                        // 현금 계좌가 없으면 만들어 준다
+      cash = {id:uid(), name:'현금', kind:'cash', opening:0, parked:false, monthly:0, payDay:null, maturity:'', fromId:''};
+      S.accounts.push(cash);
+    }
+    if(g.left <= 0 && !confirm(`이미 ${won(g.given)}을 기록했습니다. ${won(amt)}을 한 번 더 기록할까요?`)) return;
+    const parts = ['십일조 '+Math.round(g.tithe/10000)+'만'].concat(g.items.map(o=>o.name+' '+Math.round(o.amount/10000)+'만'));
+    S.txns.push({ id:uid(), seq:Date.now(), type:'expense', amount:amt, date:g.sunday,
+                  category:'헌금', memo:parts.join(', '), accountId:cash.id });
+    month = monthOf(g.sunday);
+    const after = accountBalance(cash.id);
+    commit(`${won(amt)}을 ${cash.name}에서 드린 것으로 기록했습니다.`
+      + (after < 0 ? ` 현금 잔액이 ${won(after)}이 되었습니다 — 인출 기록을 확인해 보세요.` : ''));
+  });
   document.querySelectorAll('[data-give]').forEach(b=>b.onclick=()=>{
     const g = sundayGiving();
     const parts = ['십일조 '+Math.round(g.tithe/10000)+'만'].concat(g.items.map(o=>o.name+' '+Math.round(o.amount/10000)+'만'));
@@ -2284,6 +2314,46 @@ if(cfg.url && cfg.key){
   status('', S.txns.length? '이 기기에만 저장' : '동기화 설정이 필요합니다');
   if(made) toast(`자동이체 ${made}건을 기록했습니다.`);
 }
+
+/* ══ 앱으로 쓰기 (설치·오프라인) ═══════════════════════ */
+const standalone = ()=>{
+  try{
+    if(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+    return window.navigator.standalone === true;
+  }catch(e){ return false; }
+};
+let installPrompt = null;
+
+window.addEventListener('beforeinstallprompt', e=>{
+  e.preventDefault(); installPrompt = e;
+  if(!standalone()) $('#btnInstall').style.display = '';
+});
+window.addEventListener('appinstalled', ()=>{
+  installPrompt = null; $('#btnInstall').style.display = 'none'; toast('앱으로 설치했습니다.');
+});
+
+$('#btnInstall').onclick = async ()=>{
+  if(installPrompt){
+    installPrompt.prompt();
+    const r = await installPrompt.userChoice.catch(()=>null);
+    if(r && r.outcome === 'accepted') $('#btnInstall').style.display = 'none';
+    installPrompt = null;
+    return;
+  }
+  // 아이폰은 설치 창을 띄울 수 없어 방법만 알려준다
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  toast(ios ? '공유 버튼 → 홈 화면에 추가 를 누르면 앱처럼 열립니다.'
+            : '브라우저 메뉴에서 앱 설치 또는 홈 화면에 추가 를 눌러 주세요.');
+};
+
+if('serviceWorker' in navigator && location.protocol === 'https:'){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  });
+}
+// 설치 창을 띄울 수 없는 기기에서도 안내는 볼 수 있게
+try{ if(!standalone() && !/Android/.test(navigator.userAgent)) $('#btnInstall').style.display = ''; }catch(e){}
+
 </script>
 </body>
 </html>
