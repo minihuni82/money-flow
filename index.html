@@ -45,15 +45,21 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 .hero .equation .op{color:var(--ink-faint)}
 .hero .warn{margin-top:14px;font-size:.86rem;color:var(--out)}
 
-.cols{display:grid;grid-template-columns:1fr 1fr}
-.col{padding:22px 0}
-.col:first-child{padding-right:26px;border-right:1px solid var(--rule)}
-.col:last-child{padding-left:26px}
-@media (max-width:720px){
-  .cols{grid-template-columns:1fr}
-  .col:first-child{padding-right:0;border-right:0;border-bottom:1px solid var(--rule)}
-  .col:last-child{padding-left:0}
-}
+.dash{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}
+.panel{background:var(--sheet);border:1px solid var(--rule);border-radius:6px;padding:15px 17px}
+.panel.span2{grid-column:1/-1}
+.panel > .colhead,.panel > .sechead{margin-bottom:10px}
+@media (max-width:720px){ .dash{grid-template-columns:1fr;gap:12px} }
+.ev{display:grid;grid-template-columns:58px 1fr auto;align-items:baseline;gap:10px;padding:9px 0;border-top:1px solid var(--rule-soft)}
+.ev:first-of-type{border-top:0}
+.ev .when{font-size:.8rem;color:var(--ink-soft)}
+.ev .what{min-width:0}
+.ev .what .t{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev .what .s{display:block;font-size:.75rem;color:var(--ink-faint)}
+.ev .amt{font-weight:500;white-space:nowrap}
+.ev.due .amt{color:var(--due)}
+.ev.late .when,.ev.late .amt{color:var(--out)}
+.ev.today .when{color:var(--out);font-weight:500}
 .colhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
 .colhead h2{font-size:.95rem}
 .colhead .sum{font-size:.9rem;font-weight:500}
@@ -321,7 +327,7 @@ const monthOf = s => s.slice(0,7);
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1900); }
 function commit(msg){ saveCache(); queuePush(); render(); if(msg) toast(msg); }
 
-const CATS = ['식비','생활/마트','주거/관리비','통신','교통','의료','보험','구독','교육/도서','여가','경조사','교습소','연구/업무','기타'];
+const CATS = ['식비','생활/마트','주거/관리비','통신','교통','의료','보험','구독','헌금','교육/도서','여가','경조사','교습소','연구/업무','기타'];
 
 /* ══ 계산 ══════════════════════════════════════════════ */
 function accountBalance(id){
@@ -605,6 +611,81 @@ function rollPlanDate(dateStr, repeat, anchor, lunar){
   return null;
 }
 
+/** 다음 주일(일요일)과 십일조 기준 기간 — 그 주일 직전의 월요일~토요일 */
+function sundayCycle(){
+  const t = startOfToday();
+  const sun = new Date(t); sun.setDate(sun.getDate() + ((7 - t.getDay()) % 7));
+  const sat = new Date(sun); sat.setDate(sat.getDate() - 1);
+  const mon = new Date(sat); mon.setDate(mon.getDate() - 5);
+  return { sunday: ymd(sun), from: ymd(mon), to: ymd(sat) };
+}
+const ceilMan = n => Math.ceil(n / 10000) * 10000;      // 천원 자리에서 올림 (만원 단위)
+
+const DEFAULT_OFFERINGS = [
+  { id:'ju-h', name:'주정헌금 (남편)', amount:10000, on:true },
+  { id:'ju-m', name:'주정헌금 (본인)', amount:10000, on:true },
+  { id:'mis',  name:'선교헌금',        amount:10000, on:true },
+  { id:'tmp',  name:'성전유지헌금',     amount:20000, on:true },
+  { id:'car',  name:'차량유지헌금',     amount:10000, on:true },
+  { id:'thx',  name:'감사헌금',        amount:100000, on:true }
+];
+const offeringList = ()=> (S.offerings && S.offerings.length ? S.offerings : DEFAULT_OFFERINGS);
+
+/** 이번 주일에 드릴 십일조와 헌금 */
+function sundayGiving(){
+  const cyc = sundayCycle();
+  const rate = (S.titheRate == null ? 10 : S.titheRate);
+  const income = S.txns.filter(t=>t.type==='income' && t.date>=cyc.from && t.date<=cyc.to)
+                       .reduce((s,t)=>s+t.amount, 0);
+  const exact = income * rate / 100;
+  const tithe = ceilMan(exact);                          // 만원 단위로 올려서 드린다
+  const items = offeringList().filter(o=>o.on);
+  const offering = items.reduce((s,o)=>s+o.amount, 0);
+  const given = S.txns.filter(t=>t.type==='expense' && t.category==='헌금' &&
+                                 t.date>=cyc.from && t.date<=cyc.sunday)
+                      .reduce((s,t)=>s+t.amount, 0);
+  const total = tithe + offering;
+  return { ...cyc, rate, income, exact, tithe, items, offering, total, given, left: total - given };
+}
+
+/** 지정일의 다음 도래일./** 지정일의 다음 도래일. shift 가 true 면 주말은 다음 영업일로 */
+function nextOccur(day, shift){
+  if(!day) return null;
+  const t = startOfToday(), y = t.getFullYear(), m = t.getMonth();
+  for(let k=0;k<3;k++){
+    const last = new Date(y, m+k+1, 0).getDate();
+    let d = new Date(y, m+k, Math.min(day, last));
+    if(shift) d = shiftToWeekday(d);
+    if(d >= t) return d;
+  }
+  return null;
+}
+
+/** 앞으로 며칠 안에 나갈 돈을 한데 모은다. 지난 예정 지출도 함께 알린다 */
+function upcoming(days){
+  const t = startOfToday();
+  const lim = new Date(t); lim.setDate(lim.getDate()+days);
+  const ev = [];
+  S.cards.filter(c=>c.type==='credit' && c.payDay).forEach(c=>{
+    const p = nextPayDate(c.payDay), amt = dueNow(c);
+    if(p && amt > 0 && p.date <= lim)
+      ev.push({ date:p.date, name:c.name+' 카드값', amount:amt, tag:c.auto?'자동 출금':'직접 결제', tone:'due' });
+  });
+  S.accounts.filter(a=>isParked(a) && a.monthly>0 && a.payDay).forEach(a=>{
+    const d = nextOccur(a.payDay, false);            // 적금은 주말에도 당일
+    if(d && d <= lim) ev.push({ date:d, name:a.name+' 납입', amount:a.monthly, tag:a.fromId?'자동이체':'직접 넣기', tone:'' });
+  });
+  (S.autos||[]).filter(x=>!x.off && x.day && x.amount).forEach(x=>{
+    const d = nextOccur(x.day, true);
+    if(d && d <= lim) ev.push({ date:d, name:x.name, amount:x.amount, tag:'자동이체', tone:'' });
+  });
+  (S.plans||[]).forEach(p=>{
+    const d = new Date(p.date+'T00:00:00');
+    if(d <= lim) ev.push({ date:d, name:p.name, amount:p.amount, tag:p.lunar?'음력 예정':'예정 지출', tone:d<t?'late':'' });
+  });
+  return ev.sort((a,b)=> a.date - b.date);
+}
+
 /** 밀린 자동이체를 오늘까지 만들어 넣는다 */
 function runAutos(){
   if(!S.autoLog) S.autoLog = {};
@@ -736,6 +817,46 @@ function render(){
   const plannedSum = plansSoon.reduce((s,p)=>s+p.amount,0);
 
   const dueNowSum = dueNowTotal();
+  const gv = sundayGiving();
+  const tithePanel = `
+    <div class="panel">
+      <div class="colhead"><h2>${gv.sunday.slice(5).replace('-','.')} 주일 헌금</h2><span class="sum num" style="${gv.left>0?'color:var(--due)':'color:var(--in)'}">${won(gv.total)}</span></div>
+      <div class="row">
+        <span class="name"><span class="t">십일조</span><span class="s">${gv.from.slice(5).replace('-','.')}~${gv.to.slice(5).replace('-','.')} 수입 ${won(gv.income)}${gv.income?` · ${gv.rate}%는 ${won(gv.exact)}, 만원 올림`:''}</span></span>
+        <span class="amt num">${won(gv.tithe)}</span>
+      </div>
+      <div class="row">
+        <span class="name"><span class="t">헌금</span><span class="s">${gv.items.length? esc(gv.items.map(o=>o.name.replace('헌금','')+' '+Math.round(o.amount/10000)+'만').join(', ')) : '항목 없음'}</span></span>
+        <span class="amt num">${won(gv.offering)}</span>
+      </div>
+      ${gv.given?`<div class="row">
+        <span class="name"><span class="t">드린 금액</span><span class="s">헌금으로 기록된 지출</span></span>
+        <span class="amt num" style="color:var(--in)">${won(gv.given)}</span>
+      </div>`:''}
+      ${gv.left>0 && gv.given?`<div class="row">
+        <span class="name"><span class="t">남은 금액</span></span>
+        <span class="amt num" style="color:var(--due)">${won(gv.left)}</span>
+      </div>`:''}
+      ${!gv.income?`<div class="brk">기준 기간에 수입 기록이 없어 십일조는 0원입니다.</div>`:''}
+      <div class="seg" style="margin-top:11px">
+        <button class="act" data-give="1" style="flex:1">기록하기</button>
+        <button class="act quiet" data-open="offering" style="flex:1">항목 수정</button>
+      </div>
+    </div>`;
+  const evs = upcoming(7);
+  const evSum = evs.reduce((s,e)=>s+e.amount,0);
+  const evPanel = `
+    <div class="panel span2">
+      <div class="sechead"><h2>이번 주에 나갈 돈</h2><span class="num" style="font-size:.9rem;font-weight:500;${evSum?'color:var(--due)':''}">${evs.length?won(evSum):''}</span></div>
+      ${evs.length? evs.map(e=>{
+        const dd = Math.round((e.date - startOfToday())/86400000);
+        return `<div class="ev ${e.tone} ${dd===0?'today':''}">
+          <span class="when num">${dateLabel(e.date)}</span>
+          <span class="what"><span class="t">${esc(e.name)}</span><span class="s">${esc(e.tag)} · ${dd<0?Math.abs(dd)+'일 지남':dd===0?'오늘':dd+'일 뒤'}</span></span>
+          <span class="amt num">${won(e.amount)}</span>
+        </div>`;}).join('')
+      : `<div class="hint">앞으로 7일 안에 예정된 지출이 없습니다.</div>`}
+    </div>`;
   const cardUse = S.cards.map(c=>{
     const rows = mTx.filter(t=>t.type==='expense' && t.cardId===c.id);
     return { c, sum: rows.reduce((s,t)=>s+t.amount,0), n: rows.length };
@@ -808,8 +929,10 @@ function render(){
     ${soon.length?`<div class="warn" style="color:var(--due)">결제일 임박 · ${esc(soon.join(' / '))}</div>`:''}
   </div>
 
-  <div class="cols">
-    <div class="col">
+  <div class="dash">
+    ${evPanel}
+    ${tithePanel}
+    <div class="panel">
       <div class="colhead"><h2>입출금·현금</h2><span class="sum num">${won(cash)}</span></div>
       ${spend.length? spend.map(accRow).join('') : `<div class="hint">등록된 입출금 통장이 없습니다.</div>`}
       ${savings.length?`
@@ -818,7 +941,7 @@ function render(){
       <button class="addlink" data-open="account">통장 추가</button>
     </div>
 
-    <div class="col">
+    <div class="panel">
       <div class="colhead"><h2>이번 결제일에 나갈 카드값</h2><span class="sum num" style="color:var(--due)">${won(dueNowSum)}</span></div>
       ${S.cards.length? S.cards.map(c=>{
         const d=cardDue(c.id), p=nextPayDate(c.payDay), n=daysToPay(c.payDay), acc=S.accounts.find(a=>a.id===c.accountId);
@@ -854,15 +977,18 @@ function render(){
     </div>
   </div>
 
-  <div class="actions">
+  <div class="actions" style="border-bottom:0">
     <button class="act primary" data-open="expense">지출 기록</button>
     <button class="act" data-open="income">수입 기록</button>
     <button class="act" data-open="transfer">계좌 이체</button>
     <button class="act" data-open="cardpay">카드값 결제</button>
+    <button class="act" data-open="cash">현금 인출</button>
     <button class="act" data-open="import">명세서 불러오기</button>
   </div>
 
-  <div class="section">
+  <div class="dash">
+
+  <div class="panel">
     <div class="sechead"><h2>예정 지출</h2><span class="num" style="font-size:.85rem;color:var(--ink-soft)">${plans.length?won(plans.reduce((s,p)=>s+p.amount,0)):''}</span></div>
     ${plans.length? plans.map(p=>{
       const late = p.date < todayStr();
@@ -882,13 +1008,13 @@ function render(){
     <button class="addlink" data-open="plan">예정 지출 추가</button>
   </div>
 
-  <div class="section">
+  <div class="panel">
     <div class="sechead"><h2>자동이체</h2><span class="num" style="font-size:.85rem;color:var(--ink-soft)">매달 ${won(autoMonthly)}</span></div>
     ${autoRows.length? autoRows.join('') : `<div class="hint">등록된 자동이체가 없습니다. 매달 같은 날 빠지는 이체나 고정 지출을 넣어두면 그날 알아서 기록됩니다.</div>`}
     <button class="addlink" data-open="auto">자동이체 추가</button>
   </div>
 
-  <div class="section">
+  <div class="panel span2">
     <div class="sechead">
       <h2>${month.replace('-','년 ')}월 흐름</h2>
       <select id="monthSel" style="padding:5px 9px;border:1px solid var(--rule);border-radius:var(--r);background:var(--sheet);font-family:inherit;font-size:.85rem">
@@ -909,7 +1035,7 @@ function render(){
       </div>`).join('')}</div>`:`<div class="hint">이 달의 지출 기록이 없습니다.</div>`}
   </div>
 
-  <div class="section" style="border-bottom:0">
+  <div class="panel span2">
     <div class="sechead">
       <h2>거래 내역</h2>
       <span class="filters">
@@ -930,6 +1056,7 @@ function render(){
       </div>`;}).join('')}</div>
       ${list.length>60?`<div class="hint">최근 60건만 보입니다. 전체는 CSV로 내보내 보세요.</div>`:''}`
     :`<div class="hint">기록이 없습니다. 위에서 첫 지출을 남겨 보세요.</div>`}
+  </div>
   </div>`;
   bind();
 }
@@ -939,6 +1066,11 @@ function bind(){
   document.querySelectorAll('[data-demo]').forEach(b=>b.onclick=demo);
   document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;render();});
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>openForm('cardpay',{cardId:b.dataset.pay}));
+  document.querySelectorAll('[data-give]').forEach(b=>b.onclick=()=>{
+    const g = sundayGiving();
+    const parts = ['십일조 '+Math.round(g.tithe/10000)+'만'].concat(g.items.map(o=>o.name+' '+Math.round(o.amount/10000)+'만'));
+    openForm('expense', { pre:{ amount:g.total, category:'헌금', memo:parts.join(', '), date:g.sunday }, title:'주일 헌금 기록' });
+  });
   document.querySelectorAll('[data-edit-plan]').forEach(b=>b.onclick=()=>openForm('plan',{id:b.dataset.editPlan}));
   document.querySelectorAll('[data-del-plan]').forEach(b=>b.onclick=()=>{
     const p=(S.plans||[]).find(v=>v.id===b.dataset.delPlan);
@@ -1019,7 +1151,7 @@ function accOptions(sel){
 function openForm(kind, ctx={}){
   const m=$('#modal');
   if(kind==='import'){ importModal(); return; }
-  if(['expense','income','transfer','cardpay','auto'].includes(kind) && !S.accounts.length){
+  if(['expense','income','transfer','cardpay','auto','cash'].includes(kind) && !S.accounts.length){
     openForm('account'); toast('먼저 통장을 등록해 주세요.'); return;
   }
   if(kind==='transfer' && S.accounts.length<2){ toast('이체하려면 통장이 두 개 이상 필요합니다.'); return; }
@@ -1168,20 +1300,23 @@ function openForm(kind, ctx={}){
 
   else if(kind==='expense'||kind==='income'){
     const isOut = kind==='expense';
+    const pre = ctx.plan
+      ? { amount:ctx.plan.amount, category:ctx.plan.category, memo:ctx.plan.name, date:todayStr() }
+      : Object.assign({ amount:0, category:'', memo:'', date:todayStr() }, ctx.pre || {});
     const methods = [
       ...S.accounts.map(a=>({v:'a:'+a.id,l:a.name+' ('+kindName(a)+')'})),
       ...(isOut? S.cards.map(c=>({v:'c:'+c.id,l:c.name+(c.type==='credit'?' (신용)':' (체크)')})):[])
     ];
     m.innerHTML=`
-      <h3>${ctx.plan? '예정 지출 기록' : (isOut?'지출 기록':'수입 기록')}</h3>
+      <h3>${ctx.title || (ctx.plan? '예정 지출 기록' : (isOut?'지출 기록':'수입 기록'))}</h3>
       <p class="sub">${ctx.plan? `'${esc(ctx.plan.name)}'을 실제 지출로 옮깁니다. 금액이 다르면 고쳐 주세요.`
         : (isOut?'신용카드로 쓰면 통장 잔액은 그대로 두고 결제 예정액에 쌓입니다.':'통장에 들어온 돈을 남깁니다.')}</p>
-      <div class="field"><label for="f1">금액</label><input id="f1" class="money" inputmode="numeric" placeholder="0" value="${ctx.plan?ctx.plan.amount.toLocaleString('ko-KR'):''}"></div>
+      <div class="field"><label for="f1">금액</label><input id="f1" class="money" inputmode="numeric" placeholder="0" value="${pre.amount?pre.amount.toLocaleString('ko-KR'):''}"></div>
       <div class="field"><label for="f2">${isOut?'결제 수단':'받은 통장'}</label><select id="f2">${methods.map(o=>`<option value="${o.v}">${esc(o.l)}</option>`).join('')}</select></div>
-      ${isOut?`<div class="field"><label for="f3">분류</label><select id="f3">${CATS.map(c=>`<option ${ctx.plan&&ctx.plan.category===c?'selected':''}>${c}</option>`).join('')}</select></div>`:''}
+      ${isOut?`<div class="field"><label for="f3">분류</label><select id="f3">${CATS.map(c=>`<option ${pre.category===c?'selected':''}>${c}</option>`).join('')}</select></div>`:''}
       <div class="two">
-        <div class="field"><label for="f4">날짜</label><input id="f4" type="date" value="${ctx.plan? todayStr() : todayStr()}"></div>
-        <div class="field"><label for="f5">메모</label><input id="f5" placeholder="${isOut?'예: 마트 장보기':'예: 급여'}" value="${ctx.plan?esc(ctx.plan.name):''}"></div>
+        <div class="field"><label for="f4">날짜</label><input id="f4" type="date" value="${pre.date}"></div>
+        <div class="field"><label for="f5">메모</label><input id="f5" placeholder="${isOut?'예: 마트 장보기':'예: 급여'}" value="${esc(pre.memo)}"></div>
       </div>
       <div class="err" id="err"></div>
       <div class="mfoot"><span></span><span class="right">
@@ -1285,6 +1420,86 @@ function openForm(kind, ctx={}){
       const date=$('#f4').value||todayStr();
       S.txns.push({id:uid(),seq:Date.now(),type:'cardpay',amount:amt,cardId:$('#f2').value,accountId:$('#f3').value,date,memo:''});
       month=monthOf(date); closeModal(); commit('카드값 결제를 기록했습니다.');
+    };
+  }
+
+  else if(kind==='offering'){
+    const list = offeringList().map(o=>Object.assign({}, o));
+    const draw = ()=>{
+      m.innerHTML=`
+        <h3>헌금 항목</h3>
+        <p class="sub">매주 드리는 항목을 적어 두면 주일 헌금 합계를 자동으로 계산합니다. 그 주에 안 드리는 항목은 체크를 풀면 됩니다.</p>
+        <div id="olist">${list.map((o,i)=>`
+          <div class="prow" style="grid-template-columns:22px 1fr 96px 24px;border-top:1px solid var(--rule-soft);padding:8px 0">
+            <input type="checkbox" data-on="${i}" ${o.on?'checked':''} aria-label="${esc(o.name)} 포함">
+            <input data-nm="${i}" value="${esc(o.name)}" placeholder="항목 이름" style="padding:5px 7px;font-size:.9rem">
+            <input data-am="${i}" class="money" inputmode="numeric" value="${o.amount.toLocaleString('ko-KR')}" style="padding:5px 7px;text-align:right;font-size:.9rem">
+            <button class="icon" data-rm="${i}" aria-label="줄 지우기">×</button>
+          </div>`).join('')}</div>
+        <div class="tally" style="padding-top:10px"><button type="button" class="icon" id="addrow" style="padding:0;border-bottom:1px solid var(--rule)">항목 추가</button>
+          <span class="num">합계 ${won(list.filter(o=>o.on).reduce((s,o)=>s+o.amount,0))}</span></div>
+        <div class="field" style="margin-top:12px"><label for="rate">십일조 비율</label>
+          <input id="rate" inputmode="decimal" value="${S.titheRate==null?10:S.titheRate}" style="width:90px">
+          <div class="note">수입의 몇 %로 계산할지. 계산 결과는 만원 단위로 올립니다.</div></div>
+        <div class="err" id="err"></div>
+        <div class="mfoot"><span></span><span class="right">
+          <button class="act" id="cancel">취소</button><button class="act primary" id="ok">저장</button>
+        </span></div>`;
+      m.querySelectorAll('[data-am]').forEach(el=>moneyInput(el));
+      m.querySelectorAll('[data-on]').forEach(el=>el.onchange=()=>{ list[+el.dataset.on].on=el.checked; sync(); });
+      m.querySelectorAll('[data-nm]').forEach(el=>el.oninput=()=>{ list[+el.dataset.nm].name=el.value; });
+      m.querySelectorAll('[data-am]').forEach(el=>el.addEventListener('input',()=>{ list[+el.dataset.am].amount=parseMoney(el); sync(); }));
+      m.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ list.splice(+el.dataset.rm,1); draw(); });
+      $('#addrow').onclick=()=>{ list.push({id:uid(),name:'',amount:10000,on:true}); draw(); };
+      $('#cancel').onclick=closeModal;
+      $('#ok').onclick=()=>{
+        const clean = list.filter(o=>o.name.trim() && o.amount>0)
+                          .map(o=>({id:o.id||uid(), name:o.name.trim(), amount:o.amount, on:!!o.on}));
+        const r = Number(String($('#rate').value).replace(/[^\d.]/g,''));
+        if(!(r>=0 && r<=100)){ $('#err').textContent='십일조 비율은 0에서 100 사이로 넣어 주세요.'; return; }
+        S.offerings = clean; S.titheRate = r;
+        closeModal(); commit('헌금 항목을 저장했습니다.');
+      };
+    };
+    const sync = ()=>{ const el=m.querySelector('.tally .num'); if(el) el.textContent='합계 '+won(list.filter(o=>o.on).reduce((s,o)=>s+o.amount,0)); };
+    draw();
+    $('#veil').classList.add('open');
+    return;
+  }
+
+  else if(kind==='cash'){
+    let cashAcc = S.accounts.find(a=>a.kind==='cash');
+    const banks = S.accounts.filter(a=>a.kind!=='cash' && !isParked(a));
+    if(!banks.length){ toast('출금할 통장이 없습니다.'); return; }
+    m.innerHTML=`
+      <h3>현금 인출</h3>
+      <p class="sub">통장에서 현금으로 옮깁니다. 전체 가진 돈은 그대로고, 어디에 있는지만 바뀝니다.</p>
+      <div class="field"><label for="h1">금액</label><input id="h1" class="money" inputmode="numeric" placeholder="0"></div>
+      <div class="field"><label for="h2">출금 통장</label><select id="h2">${banks.map(a=>`<option value="${a.id}">${esc(a.name)} (${won(accountBalance(a.id))})</option>`).join('')}</select></div>
+      <div class="field"><label for="h3">넣을 곳</label><select id="h3">
+        ${S.accounts.filter(a=>a.kind==='cash').map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}
+        <option value="__new">현금 (새로 만들기)</option>
+      </select></div>
+      <div class="two">
+        <div class="field"><label for="h4">날짜</label><input id="h4" type="date" value="${todayStr()}"></div>
+        <div class="field"><label for="h5">메모</label><input id="h5" placeholder="예: ATM 출금"></div>
+      </div>
+      <div class="err" id="err"></div>
+      <div class="mfoot"><span></span><span class="right">
+        <button class="act" id="cancel">취소</button><button class="act primary" id="ok">인출 기록</button>
+      </span></div>`;
+    moneyInput($('#h1')); $('#h1').focus();
+    $('#ok').onclick=()=>{
+      const amt=parseMoney($('#h1')); if(!amt){$('#err').textContent='금액을 입력해 주세요.';return;}
+      let toId=$('#h3').value;
+      if(toId==='__new'){
+        const a={id:uid(),name:'현금',kind:'cash',opening:0,parked:false,monthly:0,payDay:null,maturity:'',fromId:''};
+        S.accounts.push(a); toId=a.id;
+      }
+      const date=$('#h4').value||todayStr();
+      S.txns.push({id:uid(),seq:Date.now(),type:'transfer',amount:amt,accountId:$('#h2').value,toAccountId:toId,
+                   date,memo:$('#h5').value.trim()||'현금 인출'});
+      month=monthOf(date); closeModal(); commit('현금 인출을 기록했습니다.');
     };
   }
 
