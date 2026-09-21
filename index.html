@@ -242,6 +242,7 @@ let cfg  = { url:'', key:'' };
 let filter = 'all', month = null, pushTimer = null, syncing = false;
 let showLedger = LS.get('moneyflow:ledger') !== '0';
 let tab = LS.get('moneyflow:tab') || 'home';
+let sundayOff = 0;                       // 0 = 다가오는 주일, 음수면 지난 주일
 
 function loadCfg(){
   try{ cfg = Object.assign({url:'',key:''}, JSON.parse(LS.get(CFG_KEY)||'{}')); }catch(e){}
@@ -632,9 +633,9 @@ function rollPlanDate(dateStr, repeat, anchor, lunar){
 }
 
 /** 다음 주일(일요일)과 십일조 기준 기간 — 그 주일 직전의 월요일~토요일 */
-function sundayCycle(){
+function sundayCycle(off){
   const t = startOfToday();
-  const sun = new Date(t); sun.setDate(sun.getDate() + ((7 - t.getDay()) % 7));
+  const sun = new Date(t); sun.setDate(sun.getDate() + ((7 - t.getDay()) % 7) + (off||0)*7);
   const sat = new Date(sun); sat.setDate(sat.getDate() - 1);
   const mon = new Date(sat); mon.setDate(mon.getDate() - 5);
   return { sunday: ymd(sun), from: ymd(mon), to: ymd(sat) };
@@ -652,8 +653,8 @@ const DEFAULT_OFFERINGS = [
 const offeringList = ()=> (S.offerings && S.offerings.length ? S.offerings : DEFAULT_OFFERINGS);
 
 /** 이번 주일에 드릴 십일조와 헌금 */
-function sundayGiving(){
-  const cyc = sundayCycle();
+function sundayGiving(off){
+  const cyc = sundayCycle(off||0);
   const rate = (S.titheRate == null ? 10 : S.titheRate);
   const income = S.txns.filter(t=>t.type==='income' && t.date>=cyc.from && t.date<=cyc.to)
                        .reduce((s,t)=>s+t.amount, 0);
@@ -668,6 +669,16 @@ function sundayGiving(){
                       .reduce((s,t)=>s+t.amount, 0);
   const total = tithe + offering;
   return { ...cyc, rate, income, exact, tithe, manual, items, offering, total, given, left: total - given };
+}
+
+/** 최근 4주 가운데 헌금 기록이 없는 주일 */
+function missedSundays(){
+  const out = [];
+  for(let k=-1;k>=-4;k--){
+    const g = sundayGiving(k);
+    if(g.given <= 0 && g.total > 0) out.push({ off:k, sunday:g.sunday });
+  }
+  return out;
 }
 
 /** 지정일의 다음 도래일./** 지정일의 다음 도래일. shift 가 true 면 주말은 다음 영업일로 */
@@ -839,10 +850,16 @@ function render(){
   const plannedSum = plansSoon.reduce((s,p)=>s+p.amount,0);
 
   const dueNowSum = dueNowTotal();
-  const gv = sundayGiving();
+  const gv = sundayGiving(sundayOff);
+  const missed = missedSundays();
   const tithePanel = `
     <div class="panel">
-      <div class="colhead"><h2>${gv.sunday.slice(5).replace('-','.')} 주일 헌금</h2><span class="sum num" style="${gv.left>0?'color:var(--due)':'color:var(--in)'}">${won(gv.total)}</span></div>
+      <div class="colhead"><h2>
+        <button class="icon" data-sun="-1" aria-label="지난 주일">◀</button>
+        ${gv.sunday.slice(5).replace('-','.')} 주일 헌금
+        <button class="icon" data-sun="1" aria-label="다음 주일"${sundayOff>=0?' style="opacity:.3"':''}>▶</button>
+        ${sundayOff!==0?`<button class="icon" data-sun="0">이번 주일로</button>`:''}
+      </h2><span class="sum num" style="${gv.left>0?'color:var(--due)':'color:var(--in)'}">${won(gv.total)}</span></div>
       <div class="row">
         <span class="name"><span class="t">십일조${gv.manual?' <span class="tag">직접 지정</span>':''}</span><span class="s">${gv.from.slice(5).replace('-','.')}~${gv.to.slice(5).replace('-','.')} 수입 ${won(gv.income)}${gv.income&&!gv.manual?` · ${gv.rate}%는 ${won(gv.exact)}, 만원 올림`:''}${gv.manual&&gv.income?` · 계산값은 ${won(ceilMan(gv.exact))}`:''}</span></span>
         <span class="amt num">${won(gv.tithe)}</span>
@@ -868,6 +885,7 @@ function render(){
         <button class="act quiet" data-open="offering" style="flex:1">항목 수정</button>
       </div>
       <div class="brk" style="padding-top:7px"><button type="button" class="icon" data-give="1" style="padding:0;border-bottom:1px solid var(--rule)">현금 아닌 다른 수단으로 기록</button></div>
+      ${missed.length?`<div class="brk" style="padding-top:7px;color:var(--out)">아직 기록 안 한 주일 ${missed.map(x=>`<button type="button" class="icon" data-sun-go="${x.off}" style="padding:0 3px;color:var(--out);border-bottom:1px solid var(--out)">${x.sunday.slice(5).replace('-','.')}</button>`).join(' ')}</div>`:''}
     </div>`;
   const evs = upcoming(7);
   const evSum = evs.reduce((s,e)=>s+e.amount,0);
@@ -1052,7 +1070,7 @@ function render(){
       const sub = [t.type==='expense'&&t.category?t.category:null, methodLabel(t)].filter(Boolean).join(' · ');
       return `<div class="lrow">
         <span class="d num">${t.date.slice(5).replace('-','.')}</span>
-        <span class="m"><span class="t">${esc(title)}</span><span class="s">${esc(sub)}</span></span>
+        <span class="m"><span class="t">${esc(title)}${t.planSnap?' <span class="tag">예정에서</span>':''}</span><span class="s">${esc(sub)}</span></span>
         <span class="a num ${cls}">${sign}${won(t.amount)}</span>
         <button class="icon x" data-del-txn="${t.id}" aria-label="이 기록 삭제">×</button>
       </div>`;}).join('')}</div>
@@ -1130,8 +1148,14 @@ function bind(){
   });
   document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;render();});
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>openForm('cardpay',{cardId:b.dataset.pay}));
+  document.querySelectorAll('[data-sun]').forEach(b=>b.onclick=()=>{
+    const v = Number(b.dataset.sun);
+    sundayOff = v===0 ? 0 : Math.min(0, sundayOff + v);
+    render();
+  });
+  document.querySelectorAll('[data-sun-go]').forEach(b=>b.onclick=()=>{ sundayOff = Number(b.dataset.sunGo); render(); });
   document.querySelectorAll('[data-give-cash]').forEach(b=>b.onclick=()=>{
-    const g = sundayGiving();
+    const g = sundayGiving(sundayOff);
     const amt = g.left > 0 ? g.left : g.total;
     if(!amt){ toast('드릴 금액이 0원입니다.'); return; }
     let cash = S.accounts.find(a=>a.kind==='cash');
@@ -1149,7 +1173,7 @@ function bind(){
       + (after < 0 ? ` 현금 잔액이 ${won(after)}이 되었습니다 — 인출 기록을 확인해 보세요.` : ''));
   });
   document.querySelectorAll('[data-give]').forEach(b=>b.onclick=()=>{
-    const g = sundayGiving();
+    const g = sundayGiving(sundayOff);
     const parts = ['십일조 '+Math.round(g.tithe/10000)+'만'].concat(g.items.map(o=>o.name+' '+Math.round(o.amount/10000)+'만'));
     openForm('expense', { pre:{ amount:g.total, category:'헌금', memo:parts.join(', '), date:g.sunday }, title:'주일 헌금 기록' });
   });
@@ -1205,7 +1229,16 @@ function bind(){
     S.cards=S.cards.filter(x=>x.id!==id); commit('카드를 지웠습니다.');
   });
   document.querySelectorAll('[data-del-txn]').forEach(b=>b.onclick=()=>{
-    S.txns=S.txns.filter(t=>t.id!==b.dataset.delTxn); commit('기록을 지웠습니다.');
+    const t = S.txns.find(x=>x.id===b.dataset.delTxn);
+    let back = '';
+    if(t && t.planSnap){                                  // 예정 지출에서 옮겨 온 기록이면 되돌린다
+      if(!S.plans) S.plans=[];
+      S.plans = S.plans.filter(p=>p.id!==t.planSnap.id);
+      S.plans.push(Object.assign({}, t.planSnap));
+      back = ` '${t.planSnap.name}'을 예정 지출로 되돌렸습니다.`;
+    }
+    S.txns = S.txns.filter(x=>x.id!==b.dataset.delTxn);
+    commit('기록을 지웠습니다.' + back);
   });
   const ms=$('#monthSel'); if(ms) ms.onchange=()=>{month=ms.value;render();};
 }
@@ -1420,6 +1453,7 @@ function openForm(kind, ctx={}){
       let rolled = null;
       if(ctx.plan){
         const cur=(S.plans||[]).find(v=>v.id===ctx.plan.id);
+        if(cur) t.planSnap = Object.assign({}, cur);      // 지우면 이 내용으로 되살린다
         const next = cur && cur.repeat ? rollPlanDate(cur.date, cur.repeat, cur.anchor, cur.lunar) : null;
         if(cur && next){ cur.date = next; rolled = next; }
         else S.plans=(S.plans||[]).filter(v=>v.id!==ctx.plan.id);
@@ -1506,7 +1540,7 @@ function openForm(kind, ctx={}){
   }
 
   else if(kind==='tithe'){
-    const g = sundayGiving();
+    const g = sundayGiving(sundayOff);
     const auto = ceilMan(g.exact);
     m.innerHTML=`
       <h3>십일조 금액 정하기</h3>
