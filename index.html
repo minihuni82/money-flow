@@ -242,6 +242,7 @@ let cfg  = { url:'', key:'' };
 let filter = 'all', month = null, pushTimer = null, syncing = false;
 let showLedger = LS.get('moneyflow:ledger') !== '0';
 let tab = LS.get('moneyflow:tab') || 'home';
+let source = 'all';                      // 거래 내역에서 고른 통장·현금·카드
 let sundayOff = 0;                       // 0 = 다가오는 주일, 음수면 지난 주일
 
 function loadCfg(){
@@ -814,6 +815,20 @@ function render(){
 
   let list = S.txns.slice().sort((a,b)=> a.date<b.date?1:a.date>b.date?-1:((a.seq||0)<(b.seq||0)?1:-1));
   if(filter!=='all') list = list.filter(t=>t.type===filter);
+  if(source!=='all') list = list.filter(t=> t.accountId===source || t.toAccountId===source || t.cardId===source);
+
+  // 고른 수단의 들어온 돈·나간 돈
+  const srcAcc = S.accounts.find(a=>a.id===source), srcCard = S.cards.find(c=>c.id===source);
+  let srcIn = 0, srcOut = 0;
+  if(srcAcc) list.forEach(t=>{
+    if(t.type==='income' && t.accountId===source) srcIn += t.amount;
+    else if(t.type==='transfer' && t.toAccountId===source) srcIn += t.amount;
+    else if(t.accountId===source) srcOut += t.amount;
+  });
+  if(srcCard) list.forEach(t=>{
+    if(t.type==='expense' && t.cardId===source) srcOut += t.amount;
+    else if(t.type==='cardpay' && t.cardId===source) srcIn += t.amount;
+  });
   const shown = list.slice(0,60);
 
   const spend   = S.accounts.filter(a=>!isParked(a));
@@ -1057,12 +1072,20 @@ function render(){
     <div class="sechead">
       <h2>거래 내역 <span style="font-weight:400;color:var(--ink-faint);font-size:.85rem">${list.length}건</span></h2>
       <span class="filters">
+        <select id="srcSel" style="padding:3px 8px;border:1px solid var(--rule);border-radius:99px;background:var(--sheet);font-family:inherit;font-size:.82rem;color:var(--ink-soft)">
+          <option value="all"${source==='all'?' selected':''}>수단 전체</option>
+          ${S.accounts.length?`<optgroup label="통장·현금">${S.accounts.map(a=>`<option value="${a.id}"${source===a.id?' selected':''}>${esc(a.name)}</option>`).join('')}</optgroup>`:''}
+          ${S.cards.length?`<optgroup label="카드">${S.cards.map(c=>`<option value="${c.id}"${source===c.id?' selected':''}>${esc(c.name)}</option>`).join('')}</optgroup>`:''}
+        </select>
         ${showLedger?[['all','전체'],['expense','지출'],['income','수입'],['transfer','이체'],['cardpay','카드결제']]
           .map(([k,l])=>`<button class="chip" data-filter="${k}" aria-pressed="${filter===k}">${l}</button>`).join('')
           :''}
         <button class="chip" data-toggle-ledger="1">${showLedger?'접기':'펼치기'}</button>
       </span>
     </div>
+    ${source!=='all' && showLedger ? `<div class="brk num" style="padding:0 0 6px">${
+      srcAcc ? `들어온 돈 ${won(srcIn)} · 나간 돈 ${won(srcOut)} · 현재 잔액 ${won(accountBalance(source))}`
+             : `사용 ${won(srcOut)} · 결제함 ${won(srcIn)} · 미결제 ${won(cardDue(source))}` }</div>` : ''}
     ${!showLedger? '' : shown.length?`<div class="ledger">${shown.map(t=>{
       const sign = t.type==='income'?'+':t.type==='expense'?'−':'';
       const cls = t.type==='income'?'i':t.type==='expense'?'o':'n';
@@ -1241,6 +1264,7 @@ function bind(){
     commit('기록을 지웠습니다.' + back);
   });
   const ms=$('#monthSel'); if(ms) ms.onchange=()=>{month=ms.value;render();};
+  const ss=$('#srcSel'); if(ss) ss.onchange=()=>{source=ss.value;render();};
 }
 
 /* ══ 입력 폼 ═══════════════════════════════════════════ */
