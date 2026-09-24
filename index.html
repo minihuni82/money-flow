@@ -150,6 +150,23 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 .lrow .a.n{color:var(--ink-soft)}
 .lrow .x{opacity:.35}
 .lrow:hover .x,.lrow:focus-within .x{opacity:1}
+/* 통장 내역(통장별 입출금) */
+.pb-sum{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:2px 0 12px}
+.pb-sum div{border:1px solid var(--rule-soft);border-radius:var(--r);padding:8px 10px}
+.pb-sum span{display:block;font-size:.74rem;color:var(--ink-faint)}
+.pb-sum strong{display:block;font-weight:500;font-size:.95rem;white-space:nowrap}
+@media (max-width:560px){.pb-sum{grid-template-columns:repeat(2,1fr)}}
+.pb-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.pb-bar select{padding:5px 9px;border:1px solid var(--rule);border-radius:var(--r);background:var(--sheet);font-family:inherit;font-size:.85rem}
+.pb-list{max-height:52vh;overflow:auto;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);margin-bottom:12px}
+.pb-list .lrow{grid-template-columns:48px 1fr auto 24px;gap:10px;padding:9px 0}
+.pb-list .lrow .a{text-align:right}
+.pb-list .lrow .bal{display:block;font-size:.74rem;font-weight:400;color:var(--ink-faint)}
+.pb-list .lrow.off{opacity:.5}
+.pb-list .lrow.base{background:var(--rule-soft)}
+.pb-day{font-size:.74rem;color:var(--ink-faint);padding:10px 0 2px;border-top:1px solid var(--rule)}
+.linkname{background:none;border:0;padding:0;font:inherit;color:inherit;text-align:left;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.linkname:hover{text-decoration:underline}
 
 .empty{padding:40px 0;max-width:48ch}
 .empty p{color:var(--ink-soft);margin:0 0 16px}
@@ -269,10 +286,12 @@ async function pull(opts={}){
   if(!cfg.url || !cfg.key){ status('', '이 기기에만 저장'); return; }
   if(dirty && !opts.force){ push(); return; }
   status('wait','불러오는 중');
+  const startVer = editVer;
   try{
     const r = await fetch(cfg.url + '?key=' + encodeURIComponent(cfg.key) + '&t=' + Date.now());
     const j = await r.json();
     if(!j.ok) throw new Error(j.error==='auth' ? '키가 맞지 않습니다' : j.error);
+    if(editVer !== startVer || dirty){ push(); return; }   // 받는 사이에 이 기기에서 기록했으면 덮어쓰지 않는다
     if(j.state){ S = Object.assign({accounts:[],cards:[],txns:[]}, j.state); }
     rev = j.rev||0; dirty = false; saveCache();
     const made = runAutos();
@@ -285,16 +304,20 @@ async function pull(opts={}){
 }
 
 /** 서버로 올리기 */
+let editVer = 0;        // 변경할 때마다 늘어난다. 올리는 도중 생긴 변경을 놓치지 않으려고 쓴다
+let pushAgain = false;  // 올리는 중에 또 올릴 일이 생김
 function queuePush(){
-  dirty = true; saveCache();
+  dirty = true; editVer++; saveCache();
   if(!cfg.url || !cfg.key){ status('','이 기기에만 저장 · ' + stamp()); return; }
   status('wait','저장 중');
   clearTimeout(pushTimer);
   pushTimer = setTimeout(push, 450);
 }
 async function push(opts={}){
-  if(!cfg.url || !cfg.key || syncing) return;
-  syncing = true;
+  if(!cfg.url || !cfg.key) return;
+  if(syncing){ pushAgain = true; return; }             // 전에는 여기서 그냥 버려져 변경이 서버에 안 올라갔다
+  syncing = true; pushAgain = false;
+  const sentVer = editVer;
   try{
     const r = await fetch(cfg.url, {
       method:'POST',
@@ -302,12 +325,21 @@ async function push(opts={}){
       body: JSON.stringify({ key:cfg.key, state:S, baseRev:rev, force:!!opts.force })
     });
     const j = await r.json();
-    if(j.ok){ rev = j.rev; dirty = false; saveCache(); status('ok','동기화됨 · ' + stamp()); }
-    else if(j.error === 'conflict'){ status('bad','다른 기기와 충돌'); conflictModal(j); }
+    if(j.ok){
+      rev = j.rev;
+      if(editVer === sentVer){ dirty = false; status('ok','동기화됨 · ' + stamp()); }
+      else pushAgain = true;                             // 올리는 동안 새로 바뀐 게 있으면 한 번 더
+      saveCache();
+    }
+    else if(j.error === 'conflict'){ pushAgain = false; status('bad','다른 기기와 충돌'); conflictModal(j); }
     else throw new Error(j.error==='auth' ? '키가 맞지 않습니다' : j.error);
   }catch(e){
+    pushAgain = false;
     status('bad','저장 대기 중 (' + (e.message||'네트워크') + ')');
-  }finally{ syncing = false; }
+  }finally{
+    syncing = false;
+    if(pushAgain){ pushAgain = false; setTimeout(push, 50); }
+  }
 }
 
 function conflictModal(server){
@@ -352,12 +384,53 @@ function commit(msg){ saveCache(); queuePush(); render(); if(msg) toast(msg); }
 const CATS = ['식비','생활/마트','주거/관리비','통신','교통','의료','보험','구독','헌금','교육/도서','여가','경조사','교습소','연구/업무','기타'];
 
 /* ══ 계산 ══════════════════════════════════════════════ */
+/* ── 기준 잔액(opening)의 기준 시점 ──────────────────────
+   통장·카드를 등록하거나 잔액을 맞출 때 넣는 금액은 '그 순간 통장에 찍힌 잔액'이다.
+   그 전에 일어난 거래는 이미 그 금액에 들어 있으므로 다시 더하거나 빼면 안 된다.
+   asOf(날짜)·asOfAt(시각)이 있으면 그보다 앞선 기록은 잔액 계산에서 뺀다.
+   asOf 가 없는 예전 통장은 예전처럼 모든 기록을 더한다.                      */
+function inBase(owner, t){
+  if(!owner || !owner.asOf) return true;
+  if(t.date > owner.asOf) return true;
+  if(t.date < owner.asOf) return false;
+  return (t.seq||0) > (owner.asOfAt||0);          // 같은 날이면 잔액을 맞춘 뒤에 남긴 기록만
+}
+const stampBase = o => { o.asOf = todayStr(); o.asOfAt = Date.now(); return o; };
+
+/** 지출이 실제로 빠지는 통장. 체크카드 지출은 저장된 accountId 가 없어도(명세서로 불러온 건 등) 카드의 결제 통장에서 빠진다 */
+function spendAccountId(t){
+  if(t.type==='expense' && t.cardId){
+    const c = S.cards.find(x=>x.id===t.cardId);
+    if(c) return c.type==='debit' ? (c.accountId||'') : '';
+  }
+  return t.accountId||'';
+}
+/** 신용카드 미결제액에 쌓이는 지출인지 */
+const isCreditSpend = (t, id) => {
+  if(t.type!=='expense' || t.cardId!==id) return false;
+  const c = S.cards.find(x=>x.id===id);
+  return !c || c.type!=='debit';
+};
+/** 이 기록이 어느 통장·카드에서 기준 시점 전이라 잔액에 안 들어가는지 */
+function excludedFrom(t){
+  const out = [];
+  const acc = id => S.accounts.find(a=>a.id===id);
+  const card = S.cards.find(c=>c.id===t.cardId);
+  const check = (o, name)=>{ if(o && !inBase(o, t)) out.push(name||o.name); };
+  if(t.type==='transfer'){ check(acc(t.accountId)); check(acc(t.toAccountId)); }
+  else if(t.type==='cardpay'){ check(acc(t.accountId)); check(card); }
+  else if(t.type==='expense' && card && card.type!=='debit'){ check(card); }
+  else check(acc(spendAccountId(t)));
+  return out;
+}
+
 function accountBalance(id){
   const a = S.accounts.find(x=>x.id===id); if(!a) return 0;
   let b = a.opening||0;
   for(const t of S.txns){
+    if(!inBase(a, t)) continue;
     if(t.type==='income' && t.accountId===id) b += t.amount;
-    else if(t.type==='expense' && t.accountId===id) b -= t.amount;
+    else if(t.type==='expense' && spendAccountId(t)===id) b -= t.amount;
     else if(t.type==='transfer'){ if(t.accountId===id) b -= t.amount; if(t.toAccountId===id) b += t.amount; }
     else if(t.type==='cardpay' && t.accountId===id) b -= t.amount;
   }
@@ -365,9 +438,10 @@ function accountBalance(id){
 }
 function cardDue(id){
   const c = S.cards.find(x=>x.id===id); if(!c) return 0;
-  let d = c.opening||0;
+  let d = (c.opening||0) + (c.openingNext||0);
   for(const t of S.txns){
-    if(t.type==='expense' && t.cardId===id) d += t.amount;
+    if(!inBase(c, t)) continue;
+    if(isCreditSpend(t, id)) d += t.amount;
     else if(t.type==='cardpay' && t.cardId===id) d -= t.amount;
   }
   return d;
@@ -393,7 +467,7 @@ function cutoffOf(c, idx){
 function payDateOf(c, idx){
   const { y, m } = idxToYM(idx);
   const last = new Date(y, m+1, 0).getDate();
-  return shiftToWeekday(new Date(y, m, Math.min(c.payDay||1, last)));
+  return adjustDay(new Date(y, m, Math.min(c.payDay||1, last)), shiftOf(c,'next'));
 }
 /** 그 날 쓴 돈이 어느 결제월에 청구되는지 */
 function billMonthIdx(c, dateStr){
@@ -410,14 +484,19 @@ function billMonthIdx(c, dateStr){
 /** 미결제액을 청구 회차별로 쪼갠다. 결제 기록은 오래된 회차부터 지워 나간다 */
 function cardBuckets(c){
   const byB = {};
-  if(c.opening) byB.before = c.opening;                // 직접 입력한 금액은 가장 오래된 회차로 본다
+  if(c.opening) byB.before = c.opening;                // 직접 입력한 청구 금액은 가장 오래된 회차로 본다
+  if(c.openingNext){                                   // 직접 입력한 미청구 금액은 입력한 날 쓴 돈과 같은 회차로
+    const idx = billMonthIdx(c, c.asOf || todayStr());
+    const k = idx===null ? 'before' : String(idx);
+    byB[k] = (byB[k]||0) + c.openingNext;
+  }
   S.txns.forEach(t=>{
-    if(t.type!=='expense' || t.cardId!==c.id) return;
+    if(!isCreditSpend(t, c.id) || !inBase(c, t)) return;
     const idx = billMonthIdx(c, t.date);
     const k = idx===null ? 'before' : String(idx);
     byB[k] = (byB[k]||0) + t.amount;
   });
-  let paid = S.txns.filter(t=>t.type==='cardpay' && t.cardId===c.id).reduce((s,t)=>s+t.amount,0);
+  let paid = S.txns.filter(t=>t.type==='cardpay' && t.cardId===c.id && inBase(c, t)).reduce((s,t)=>s+t.amount,0);
   const keys = Object.keys(byB).sort((a,b)=>
     a==='before'?-1 : b==='before'?1 : Number(a)-Number(b));
   const out = [];
@@ -438,7 +517,7 @@ function dueUpTo(c, idx){
 }
 /** 다음 결제일에 실제로 빠질 금액 */
 function dueNow(c){
-  const p = nextPayDate(c.payDay);
+  const p = nextPayDate(c.payDay, shiftOf(c,'next'));
   if(!p) return cardDue(c.id);
   return dueUpTo(c, p.date.getFullYear()*12 + p.date.getMonth());
 }
@@ -483,40 +562,63 @@ const dateLabel = d => (d.getMonth()+1)+'.'+d.getDate()+'('+WD[d.getDay()]+')';
 const startOfToday = ()=>{ const n=new Date(); return new Date(n.getFullYear(),n.getMonth(),n.getDate()); };
 
 /** 지정일이 토·일이면 다음 월요일로 미룬다. 카드 결제와 자동이체가 실제로 그렇게 빠진다. */
+/* 은행이 쉬는 날 — 공휴일·대체공휴일과 근로자의 날(5.1). 카드값·자동이체가 다음 영업일로 밀린다.
+   목록에 없는 해는 주말만 건너뛴다. 해가 바뀌면 여기에 날짜를 더해 주세요. */
+const BANK_HOLIDAYS = new Set([
+  // 2026
+  '2026-01-01','2026-02-16','2026-02-17','2026-02-18','2026-03-02','2026-05-01','2026-05-05','2026-05-25',
+  '2026-06-03','2026-07-17','2026-08-17','2026-09-24','2026-09-25','2026-09-26','2026-10-05','2026-10-09','2026-12-25',
+  // 2027
+  '2027-01-01','2027-02-08','2027-02-09','2027-03-01','2027-05-01','2027-05-05','2027-05-13','2027-07-17',
+  '2027-08-16','2027-09-14','2027-09-15','2027-09-16','2027-10-04','2027-10-11','2027-12-27'
+]);
+const isBankHoliday = d => d.getDay()===0 || d.getDay()===6 || BANK_HOLIDAYS.has(ymd(d));
 function shiftToWeekday(d){
-  const w = d.getDay();
-  if(w===6) d.setDate(d.getDate()+2);
-  else if(w===0) d.setDate(d.getDate()+1);
+  for(let i=0;i<14 && isBankHoliday(d);i++) d.setDate(d.getDate()+1);
   return d;
 }
-/** 다음 결제(납입) 예정일. {date, shifted} — shifted 는 주말 때문에 밀렸는지 */
-function nextPayDate(day){
+/* 주말·공휴일 처리 방식. 항목마다 고른다.
+   next = 다음 영업일로 미룸, prev = 전 영업일로 당김, same = 그날 그대로 */
+const SHIFT_MODES = [['next','다음 영업일'],['prev','전 영업일'],['same','그날 그대로']];
+function normMode(mode){ return mode===true ? 'next' : (mode==='next'||mode==='prev') ? mode : 'same'; }
+/** 항목에 저장된 방식. 예전 데이터는 적금 = 그날, 카드값·자동이체 = 다음 영업일 */
+const shiftOf = (o, def) => normMode(o && o.shift ? o.shift : def);
+function adjustDay(d, mode){
+  mode = normMode(mode);
+  if(mode==='next') return shiftToWeekday(d);
+  if(mode==='prev'){ for(let i=0;i<14 && isBankHoliday(d);i++) d.setDate(d.getDate()-1); }
+  return d;
+}
+const shiftText = mode => ({next:'휴일이면 다음 영업일', prev:'휴일이면 전 영업일', same:'휴일에도 그날'})[normMode(mode)];
+/** 다음 결제(납입) 예정일. {date, shifted, dir} — shifted 는 휴일 때문에 옮겨졌는지 */
+function nextPayDate(day, mode='next'){
   if(!day) return null;
   const today = startOfToday(), y = today.getFullYear(), m = today.getMonth();
-  for(let k=0;k<3;k++){
+  for(let k=-1;k<3;k++){                                  // 지난달 말일이 이번 달로 밀려 오는 경우도 본다
     const last = new Date(y, m+k+1, 0).getDate();
     const nominal = new Date(y, m+k, Math.min(day, last));
-    const date = shiftToWeekday(new Date(nominal));
-    if(date >= today) return { date, shifted: date.getTime() !== nominal.getTime(), nominal };
+    const date = adjustDay(new Date(nominal), mode);
+    if(date >= today) return { date, shifted: date.getTime() !== nominal.getTime(), dir: normMode(mode), nominal };
   }
   return null;
 }
-function daysToPay(day){
-  const p = nextPayDate(day);
+const shiftedMark = p => p && p.shifted ? (p.dir==='prev' ? ' 휴일 당김' : ' 휴일 밀림') : '';
+function daysToPay(day, mode='next'){
+  const p = nextPayDate(day, mode);
   return p ? Math.round((p.date - startOfToday())/86400000) : null;
 }
 
 /* ══ 자동이체 ═══════════════════════════════════════════
-   적금 납입은 지정일 당일, 카드값과 그 밖의 자동이체는 주말이면 다음 영업일.
+   주말·공휴일에 걸리면 항목마다 고른 방식(다음 영업일·전 영업일·그날)대로 옮긴다. 기본은 적금 그날, 나머지 다음 영업일.
    한 번 만든 건은 autoLog 에 남겨서 지워도 다시 생기지 않는다. */
 
 /** 특정 날짜 기준 카드 미결제 잔액 */
 function cardDueAt(id, upto){
   const c = S.cards.find(x=>x.id===id); if(!c) return 0;
-  let d = c.opening||0;
+  let d = (c.opening||0) + (c.openingNext||0);
   for(const t of S.txns){
-    if(t.date > upto) continue;
-    if(t.type==='expense' && t.cardId===id) d += t.amount;
+    if(t.date > upto || !inBase(c, t)) continue;
+    if(isCreditSpend(t, id)) d += t.amount;
     else if(t.type==='cardpay' && t.cardId===id) d -= t.amount;
   }
   return d;
@@ -524,7 +626,7 @@ function cardDueAt(id, upto){
 /** since 달부터 이번 달까지 */
 function monthsSince(since){
   const out = [];
-  let [y,m] = (since || monthOf(todayStr())).split('-').map(Number);
+  let [y,m] = (since || todayStr()).slice(0,7).split('-').map(Number);
   const now = new Date(), ey = now.getFullYear(), em = now.getMonth()+1;
   while(y < ey || (y === ey && m <= em)){
     out.push(y+'-'+String(m).padStart(2,'0'));
@@ -533,27 +635,15 @@ function monthsSince(since){
   }
   return out;
 }
-/** 그 달의 실제 실행일. shift 가 true 면 주말은 다음 영업일로 */
-function occurDate(ym, day, shift){
+/** 그 달 회차의 실제 실행일 (주말·공휴일 처리 방식 반영) */
+function occurDate(ym, day, mode){
   const [y,m] = ym.split('-').map(Number);
   const last = new Date(y, m, 0).getDate();
-  const d = new Date(y, m-1, Math.min(day, last));
-  return shift ? shiftToWeekday(d) : d;
+  return adjustDay(new Date(y, m-1, Math.min(day, last)), mode);
 }
-function autoNextLabel(day, shift){
-  if(!day) return '';
-  if(!shift){
-    const p = nextPayDate(day);            // 당일 처리라 주말 보정 없이 날짜만
-    const t = startOfToday(), y = t.getFullYear(), m = t.getMonth();
-    for(let k=0;k<3;k++){
-      const last = new Date(y, m+k+1, 0).getDate();
-      const d = new Date(y, m+k, Math.min(day, last));
-      if(d >= t) return dateLabel(d);
-    }
-    return '';
-  }
-  const p = nextPayDate(day);
-  return p ? dateLabel(p.date) + (p.shifted ? ' 주말 밀림' : '') : '';
+function autoNextLabel(day, mode){
+  const p = nextPayDate(day, mode);
+  return p ? dateLabel(p.date) + shiftedMark(p) : '';
 }
 
 const LUNAR = {
@@ -682,17 +772,10 @@ function missedSundays(){
   return out;
 }
 
-/** 지정일의 다음 도래일./** 지정일의 다음 도래일. shift 가 true 면 주말은 다음 영업일로 */
-function nextOccur(day, shift){
-  if(!day) return null;
-  const t = startOfToday(), y = t.getFullYear(), m = t.getMonth();
-  for(let k=0;k<3;k++){
-    const last = new Date(y, m+k+1, 0).getDate();
-    let d = new Date(y, m+k, Math.min(day, last));
-    if(shift) d = shiftToWeekday(d);
-    if(d >= t) return d;
-  }
-  return null;
+/** 지정일의 다음 도래일. shift 가 true 면 주말은 다음 영업일로 */
+function nextOccur(day, mode){
+  const p = nextPayDate(day, mode);
+  return p ? p.date : null;
 }
 
 /** 앞으로 며칠 안에 나갈 돈을 한데 모은다. 지난 예정 지출도 함께 알린다 */
@@ -701,16 +784,16 @@ function upcoming(days){
   const lim = new Date(t); lim.setDate(lim.getDate()+days);
   const ev = [];
   S.cards.filter(c=>c.type==='credit' && c.payDay).forEach(c=>{
-    const p = nextPayDate(c.payDay), amt = dueNow(c);
+    const p = nextPayDate(c.payDay, shiftOf(c,'next')), amt = dueNow(c);
     if(p && amt > 0 && p.date <= lim)
       ev.push({ date:p.date, name:c.name+' 카드값', amount:amt, tag:c.auto?'자동 출금':'직접 결제', tone:'due' });
   });
   S.accounts.filter(a=>isParked(a) && a.monthly>0 && a.payDay).forEach(a=>{
-    const d = nextOccur(a.payDay, false);            // 적금은 주말에도 당일
+    const d = nextOccur(a.payDay, shiftOf(a,'same'));
     if(d && d <= lim) ev.push({ date:d, name:a.name+' 납입', amount:a.monthly, tag:a.fromId?'자동이체':'직접 넣기', tone:'' });
   });
   (S.autos||[]).filter(x=>!x.off && x.day && x.amount).forEach(x=>{
-    const d = nextOccur(x.day, true);
+    const d = nextOccur(x.day, shiftOf(x,'next'));
     if(d && d <= lim) ev.push({ date:d, name:x.name, amount:x.amount, tag:'자동이체', tone:'' });
   });
   (S.plans||[]).forEach(p=>{
@@ -725,6 +808,9 @@ function runAutos(){
   if(!S.autoLog) S.autoLog = {};
   const log = S.autoLog, today = startOfToday();
   let made = 0;
+  // since 가 날짜(YYYY-MM-DD)면 등록한 날보다 앞선 회차는 만들지 않는다.
+  // 등록할 때 넣은 잔액에 이미 빠져 있는 돈이라, 만들면 두 번 빠진다.
+  const tooEarly = (since, d) => since && since.length===10 && ymd(d) < since;
   const put = (key, txn)=>{
     if(log[key]) return;
     log[key] = txn.date;
@@ -736,8 +822,8 @@ function runAutos(){
   S.accounts.filter(a=>isParked(a) && a.monthly>0 && a.payDay && a.fromId).forEach(a=>{
     if(!S.accounts.some(x=>x.id===a.fromId)) return;
     monthsSince(a.since).forEach(ym=>{
-      const d = occurDate(ym, a.payDay, false);
-      if(d > today) return;
+      const d = occurDate(ym, a.payDay, shiftOf(a,'same'));
+      if(d > today || tooEarly(a.since, d)) return;
       put('auto:acc:'+a.id+':'+ym, {
         type:'transfer', amount:a.monthly, accountId:a.fromId, toAccountId:a.id,
         date:ymd(d), memo:a.name+' 자동납입'
@@ -748,8 +834,8 @@ function runAutos(){
   // 2) 카드값 자동 출금 — 영업일, 그 시점 미결제 잔액 전액
   S.cards.filter(c=>c.type==='credit' && c.auto && c.payDay && c.accountId).forEach(c=>{
     monthsSince(c.since).forEach(ym=>{
-      const d = occurDate(ym, c.payDay, true);
-      if(d > today) return;
+      const d = occurDate(ym, c.payDay, shiftOf(c,'next'));
+      if(d > today || tooEarly(c.since, d)) return;
       const key = 'auto:card:'+c.id+':'+ym;
       if(log[key]) return;
       const due = dueUpTo(c, Number(ym.slice(0,4))*12 + Number(ym.slice(5,7)) - 1);   // 그 회차까지의 몫만
@@ -763,8 +849,8 @@ function runAutos(){
     if(!x.day || !x.amount || !S.accounts.some(a=>a.id===x.fromId)) return;
     if(x.kind==='transfer' && !S.accounts.some(a=>a.id===x.toId)) return;
     monthsSince(x.since).forEach(ym=>{
-      const d = occurDate(ym, x.day, true);
-      if(d > today) return;
+      const d = occurDate(ym, x.day, shiftOf(x,'next'));
+      if(d > today || tooEarly(x.since, d)) return;
       const base = { amount:x.amount, accountId:x.fromId, date:ymd(d), memo:x.name };
       put('auto:tx:'+x.id+':'+ym, x.kind==='transfer'
         ? Object.assign({type:'transfer', toAccountId:x.toId}, base)
@@ -815,17 +901,20 @@ function render(){
 
   let list = S.txns.slice().sort((a,b)=> a.date<b.date?1:a.date>b.date?-1:((a.seq||0)<(b.seq||0)?1:-1));
   if(filter!=='all') list = list.filter(t=>t.type===filter);
-  if(source!=='all') list = list.filter(t=> t.accountId===source || t.toAccountId===source || t.cardId===source);
+  if(source!=='all') list = list.filter(t=> t.accountId===source || t.toAccountId===source || t.cardId===source || spendAccountId(t)===source);
 
-  // 고른 수단의 들어온 돈·나간 돈
+  // 고른 수단의 들어온 돈·나간 돈 — 잔액에 반영되는 기록만 센다
   const srcAcc = S.accounts.find(a=>a.id===source), srcCard = S.cards.find(c=>c.id===source);
   let srcIn = 0, srcOut = 0;
-  if(srcAcc) list.forEach(t=>{
+  if(srcAcc) S.txns.forEach(t=>{
+    if(!inBase(srcAcc, t)) return;
     if(t.type==='income' && t.accountId===source) srcIn += t.amount;
     else if(t.type==='transfer' && t.toAccountId===source) srcIn += t.amount;
+    else if(t.type==='expense'){ if(spendAccountId(t)===source) srcOut += t.amount; }
     else if(t.accountId===source) srcOut += t.amount;
   });
-  if(srcCard) list.forEach(t=>{
+  if(srcCard) S.txns.forEach(t=>{
+    if(!inBase(srcCard, t)) return;
     if(t.type==='expense' && t.cardId===source) srcOut += t.amount;
     else if(t.type==='cardpay' && t.cardId===source) srcIn += t.amount;
   });
@@ -838,19 +927,20 @@ function render(){
     const bal = accountBalance(a.id);
     let sub = kindName(a);
     if(isParked(a) && (a.monthly || a.payDay || a.maturity)){
-      const n = daysToPay(a.payDay), p = nextPayDate(a.payDay);
+      const md = shiftOf(a,'same'), n = daysToPay(a.payDay, md), p = nextPayDate(a.payDay, md);
       sub = [
         a.monthly? '매월 '+(a.payDay?a.payDay+'일 ':'')+won(a.monthly) : (a.payDay? '매월 '+a.payDay+'일':kindName(a)),
-        p? dateLabel(p.date)+(p.shifted?' 주말 밀림':'') : null,
+        p? dateLabel(p.date)+shiftedMark(p) : null,
         n!==null? (n===0?'넣는 날 오늘':n+'일 뒤') : null,
         a.maturity? '만기 '+a.maturity.replace(/-/g,'.') : null
       ].filter(Boolean).join(' · ');
     }
     return `
       <div class="row">
-        <span class="name"><span class="t">${esc(a.name)}</span><span class="s">${esc(sub)}</span></span>
+        <span class="name"><button class="t linkname" data-book="${a.id}" title="입출금 내역 보기">${esc(a.name)}</button><span class="s">${esc(sub)}</span></span>
         <span class="amt num">${won(bal)}</span>
         <span class="tools">
+          <button class="icon" data-book="${a.id}">내역</button>
           ${isParked(a)&&spend.length?`<button class="icon" data-deposit="${a.id}">${isSaving(a)?'납입':'넣기'}</button>`:''}
           <button class="icon" data-edit-account="${a.id}">수정</button>
           <button class="icon" data-del-account="${a.id}">삭제</button>
@@ -930,7 +1020,7 @@ function render(){
     autoMonthly += a.monthly;
     autoRows.push(`
       <div class="row">
-        <span class="name"><span class="t">${esc(a.name)} 납입</span><span class="s">매월 ${a.payDay}일 당일 · 다음 ${autoNextLabel(a.payDay,false)} · ${from?esc(from.name):'?'} → ${esc(a.name)}</span></span>
+        <span class="name"><span class="t">${esc(a.name)} 납입</span><span class="s">매월 ${a.payDay}일 · ${shiftText(shiftOf(a,'same'))} · 다음 ${autoNextLabel(a.payDay,shiftOf(a,'same'))} · ${from?esc(from.name):'?'} → ${esc(a.name)}</span></span>
         <span class="amt num">${won(a.monthly)}</span>
         <span class="tools"><button class="icon" data-edit-account="${a.id}">수정</button></span>
       </div>`);
@@ -939,7 +1029,7 @@ function render(){
     const from = S.accounts.find(x=>x.id===c.accountId);
     autoRows.push(`
       <div class="row">
-        <span class="name"><span class="t">${esc(c.name)} 결제</span><span class="s">매월 ${c.payDay}일 영업일 · 다음 ${autoNextLabel(c.payDay,true)} · ${from?esc(from.name):'?'}에서 전액</span></span>
+        <span class="name"><span class="t">${esc(c.name)} 결제</span><span class="s">매월 ${c.payDay}일 · ${shiftText(shiftOf(c,'next'))} · 다음 ${autoNextLabel(c.payDay,shiftOf(c,'next'))} · ${from?esc(from.name):'?'}에서 전액</span></span>
         <span class="amt num due">${won(cardDue(c.id))}</span>
         <span class="tools"><button class="icon" data-edit-card="${c.id}">수정</button></span>
       </div>`);
@@ -949,7 +1039,7 @@ function render(){
     if(!x.off) autoMonthly += x.amount;
     autoRows.push(`
       <div class="row" ${x.off?'style="opacity:.45"':''}>
-        <span class="name"><span class="t">${esc(x.name)}${x.off?' <span class="tag">멈춤</span>':''}</span><span class="s">매월 ${x.day}일 영업일 · 다음 ${autoNextLabel(x.day,true)} · ${
+        <span class="name"><span class="t">${esc(x.name)}${x.off?' <span class="tag">멈춤</span>':''}</span><span class="s">매월 ${x.day}일 · ${shiftText(shiftOf(x,'next'))} · 다음 ${autoNextLabel(x.day,shiftOf(x,'next'))} · ${
           x.kind==='transfer' ? `${from?esc(from.name):'?'} → ${to?esc(to.name):'?'}` : `${from?esc(from.name):'?'} · ${esc(x.category||'기타')}`
         }</span></span>
         <span class="amt num">${won(x.amount)}</span>
@@ -961,19 +1051,19 @@ function render(){
       </div>`);
   });
 
-  const soon = S.cards.filter(c=>c.type==='credit' && cardDue(c.id)>0 && daysToPay(c.payDay)!==null && daysToPay(c.payDay)<=7)
-    .map(c=>{ const p=nextPayDate(c.payDay), n=daysToPay(c.payDay);
-      return `${c.name} ${dateLabel(p.date)}${p.shifted?'(주말 밀림)':''} ${n===0?'오늘':n+'일 뒤'} ${won(cardDue(c.id))}`; });
+  const soon = S.cards.filter(c=>c.type==='credit' && cardDue(c.id)>0 && daysToPay(c.payDay, shiftOf(c,'next'))!==null && daysToPay(c.payDay, shiftOf(c,'next'))<=7)
+    .map(c=>{ const p=nextPayDate(c.payDay, shiftOf(c,'next')), n=daysToPay(c.payDay, shiftOf(c,'next'));
+      return `${c.name} ${dateLabel(p.date)}${p.shifted?'('+shiftedMark(p).trim()+')':''} ${n===0?'오늘':n+'일 뒤'} ${won(cardDue(c.id))}`; });
 
   const pCard = `
     <div class="panel">
       <div class="colhead"><h2>이번 결제일에 나갈 카드값</h2><span class="sum num" style="color:var(--due)">${won(dueNowSum)}</span></div>
       ${S.cards.length? S.cards.map(c=>{
-        const d=cardDue(c.id), p=nextPayDate(c.payDay), n=daysToPay(c.payDay), acc=S.accounts.find(a=>a.id===c.accountId);
+        const d=cardDue(c.id), p=nextPayDate(c.payDay, shiftOf(c,'next')), n=daysToPay(c.payDay, shiftOf(c,'next')), acc=S.accounts.find(a=>a.id===c.accountId);
         return `
         <div class="row">
           <span class="name"><span class="t">${esc(c.name)}</span><span class="s">${c.type==='credit'
-            ? `${c.payDay?c.payDay+'일 결제':'결제일 미설정'}${p?` · ${dateLabel(p.date)}${p.shifted?' 주말 밀림':''} · ${n===0?'오늘':n+'일 뒤'}`:''} · ${billEndText(c)}${acc?' · '+esc(acc.name):''}`
+            ? `${c.payDay?c.payDay+'일 결제':'결제일 미설정'}${p?` · ${dateLabel(p.date)}${shiftedMark(p)} · ${n===0?'오늘':n+'일 뒤'}`:''} · ${billEndText(c)}${acc?' · '+esc(acc.name):''}`
             : `체크카드${acc?' · '+esc(acc.name):''}`}</span></span>
           <span class="amt num ${c.type==='credit'?'due':''}">${c.type==='credit'?won(dueNow(c)):'즉시 출금'}</span>
           <span class="tools">
@@ -983,7 +1073,7 @@ function render(){
           </span>
         </div>
         ${c.type==='credit'? cardBuckets(c).map(b=>{
-          const np = nextPayDate(c.payDay);
+          const np = nextPayDate(c.payDay, shiftOf(c,'next'));
           const soonBill = b.key==='before' || (np && b.payDate && b.payDate.getTime() <= np.date.getTime());
           return `<div class="brk num" style="${soonBill?'color:var(--due)':''}">${
             b.key==='before' ? '직접 입력한 금액' : periodLabel(b)+' 사용'
@@ -1009,6 +1099,7 @@ function render(){
         <div class="subhead"><span>모아둔 돈</span><span class="num">${won(saved)}</span></div>
         ${savings.map(accRow).join('')}`:''}
       <button class="addlink" data-open="account">통장 추가</button>
+      ${S.accounts.length?`<div class="brk" style="padding-top:8px;margin-top:0">은행 앱 잔액과 다르면 그 통장의 수정을 눌러 실제 잔액을 넣으세요. 그 시각부터 다시 맞춰 계산합니다.</div>`:''}
     </div>`;
   const pGiveLog = `
   <div class="panel">
@@ -1084,7 +1175,7 @@ function render(){
       </span>
     </div>
     ${source!=='all' && showLedger ? `<div class="brk num" style="padding:0 0 6px">${
-      srcAcc ? `들어온 돈 ${won(srcIn)} · 나간 돈 ${won(srcOut)} · 현재 잔액 ${won(accountBalance(source))}`
+      srcAcc ? `${srcAcc.asOf?`${srcAcc.asOf.slice(5).replace('-','.')} 기준 ${won(srcAcc.opening||0)}에서 `:`시작 ${won(srcAcc.opening||0)}에서 `}들어온 돈 ${won(srcIn)} · 나간 돈 ${won(srcOut)} → 현재 잔액 ${won(accountBalance(source))} · <button type="button" class="icon" data-book="${srcAcc.id}" style="padding:0;border-bottom:1px solid var(--rule)">통장 내역으로 보기</button>`
              : `사용 ${won(srcOut)} · 결제함 ${won(srcIn)} · 미결제 ${won(cardDue(source))}` }</div>` : ''}
     ${!showLedger? '' : shown.length?`<div class="ledger">${shown.map(t=>{
       const sign = t.type==='income'?'+':t.type==='expense'?'−':'';
@@ -1093,7 +1184,8 @@ function render(){
       const sub = [t.type==='expense'&&t.category?t.category:null, methodLabel(t)].filter(Boolean).join(' · ');
       return `<div class="lrow">
         <span class="d num">${t.date.slice(5).replace('-','.')}</span>
-        <span class="m"><span class="t">${esc(title)}${t.planSnap?' <span class="tag">예정에서</span>':''}</span><span class="s">${esc(sub)}</span></span>
+        <span class="m"><span class="t">${esc(title)}${t.planSnap?' <span class="tag">예정에서</span>':''}${(()=>{ const ex=excludedFrom(t);
+          return ex.length?` <span class="tag" title="${esc(ex.join(', '))}의 기준 잔액에 이미 들어 있어 다시 계산하지 않습니다">잔액 기준 전</span>`:''; })()}</span><span class="s">${esc(sub)}</span></span>
         <span class="a num ${cls}">${sign}${won(t.amount)}</span>
         <button class="icon x" data-del-txn="${t.id}" aria-label="이 기록 삭제">×</button>
       </div>`;}).join('')}</div>
@@ -1220,7 +1312,7 @@ function bind(){
   document.querySelectorAll('[data-off-auto]').forEach(b=>b.onclick=()=>{
     const x=(S.autos||[]).find(v=>v.id===b.dataset.offAuto); if(!x) return;
     x.off = !x.off;
-    if(!x.off) x.since = monthOf(todayStr());     // 다시 켤 때 지난 달을 소급하지 않는다
+    if(!x.off) x.since = todayStr();     // 다시 켤 때 지난 달을 소급하지 않는다
     const back = !x.off;
     commit(back?'자동이체를 다시 켰습니다.':'자동이체를 멈췄습니다.');
     if(back && runAutos()) render();
@@ -1251,35 +1343,196 @@ function bind(){
     if(!confirm(`'${c.name}'을 지울까요?`)) return;
     S.cards=S.cards.filter(x=>x.id!==id); commit('카드를 지웠습니다.');
   });
-  document.querySelectorAll('[data-del-txn]').forEach(b=>b.onclick=()=>{
-    const t = S.txns.find(x=>x.id===b.dataset.delTxn);
-    let back = '';
-    if(t && t.planSnap){                                  // 예정 지출에서 옮겨 온 기록이면 되돌린다
-      if(!S.plans) S.plans=[];
-      S.plans = S.plans.filter(p=>p.id!==t.planSnap.id);
-      S.plans.push(Object.assign({}, t.planSnap));
-      back = ` '${t.planSnap.name}'을 예정 지출로 되돌렸습니다.`;
-    }
-    S.txns = S.txns.filter(x=>x.id!==b.dataset.delTxn);
-    commit('기록을 지웠습니다.' + back);
-  });
+  document.querySelectorAll('#app [data-del-txn]').forEach(b=>b.onclick=()=>deleteTxn(b.dataset.delTxn));
+  document.querySelectorAll('#app [data-book]').forEach(b=>b.onclick=()=>passbook(b.dataset.book));
   const ms=$('#monthSel'); if(ms) ms.onchange=()=>{month=ms.value;render();};
   const ss=$('#srcSel'); if(ss) ss.onchange=()=>{source=ss.value;render();};
 }
 
+/** 기록 하나 지우기. 예정 지출에서 옮겨 온 기록이면 예정 지출로 되돌린다 */
+function deleteTxn(id){
+  const t = S.txns.find(x=>x.id===id);
+  let back = '';
+  if(t && t.planSnap){
+    if(!S.plans) S.plans=[];
+    S.plans = S.plans.filter(p=>p.id!==t.planSnap.id);
+    S.plans.push(Object.assign({}, t.planSnap));
+    back = ` '${t.planSnap.name}'을 예정 지출로 되돌렸습니다.`;
+  }
+  S.txns = S.txns.filter(x=>x.id!==id);
+  commit('기록을 지웠습니다.' + back);
+}
+
+/* ══ 통장 내역 ═════════════════════════════════════════
+   은행 앱처럼 통장 하나의 입금·출금을 날짜순으로 보여주고, 거래마다 그 뒤 잔액을 붙인다. */
+
+/** 이 기록이 그 통장 잔액을 얼마나 바꾸는지 (+입금 / −출금) */
+function accDelta(t, id){
+  if(t.type==='income')   return t.accountId===id ? t.amount : 0;
+  if(t.type==='expense')  return spendAccountId(t)===id ? -t.amount : 0;
+  if(t.type==='transfer') return (t.toAccountId===id ? t.amount : 0) - (t.accountId===id ? t.amount : 0);
+  if(t.type==='cardpay')  return t.accountId===id ? -t.amount : 0;
+  return 0;
+}
+/** 통장의 모든 기록을 오래된 순으로. in=잔액에 반영되는지, bal=그 거래 뒤 잔액 */
+function passbookRows(id){
+  const a = S.accounts.find(x=>x.id===id); if(!a) return [];
+  const rows = S.txns.filter(t=>accDelta(t,id)!==0)
+    .map(t=>({ t, delta:accDelta(t,id), in:inBase(a,t) }))
+    .sort((x,y)=> x.t.date<y.t.date?-1 : x.t.date>y.t.date?1 : (x.t.seq||0)-(y.t.seq||0));
+  // 기준 잔액 줄: 잔액을 맞춘 시점(없으면 맨 처음)에 넣는다
+  const base = { base:true, date: a.asOf || (rows[0] ? rows[0].t.date : todayStr()), bal: a.opening||0 };
+  const firstIn = rows.findIndex(r=>r.in);
+  const at = a.asOf ? (firstIn<0 ? rows.length : firstIn) : 0;
+  rows.splice(at, 0, base);
+  let bal = a.opening||0;
+  rows.forEach(r=>{ if(r.base) return; if(r.in){ bal += r.delta; r.bal = bal; } else r.bal = null; });
+  return rows;
+}
+function pbTitle(t, id){
+  if(t.type==='income') return t.memo || '수입';
+  if(t.type==='expense') return t.memo || t.category || '지출';
+  if(t.type==='transfer') return t.memo || transferTitle(t);
+  return '카드값 결제';
+}
+function pbSub(t, id){
+  const nm = x => { const a=S.accounts.find(v=>v.id===x); return a?a.name:'?'; };
+  if(t.type==='transfer') return t.accountId===id ? '보냄 → '+nm(t.toAccountId) : '받음 ← '+nm(t.accountId);
+  if(t.type==='cardpay'){ const c=S.cards.find(x=>x.id===t.cardId); return (c?c.name:'카드')+(t.auto?' · 자동 출금':''); }
+  if(t.type==='expense'){
+    const c = t.cardId && S.cards.find(x=>x.id===t.cardId);
+    return [t.memo&&t.category?t.category:null, c?c.name:null].filter(Boolean).join(' · ');
+  }
+  return t.auto ? '자동' : '';
+}
+
+let pbState = { month:null, dir:'all' };
+function passbook(id){
+  const a = S.accounts.find(x=>x.id===id); if(!a) return;
+  const m = $('#modal');
+  m.classList.add('wide');
+  const all = passbookRows(id);
+  const today = todayStr();
+  const months = [...new Set([monthOf(today), ...all.map(r=>monthOf(r.base?r.date:r.t.date))])].sort().reverse();
+  if(!pbState.month || (pbState.month!=='all' && !months.includes(pbState.month))) pbState.month = monthOf(today);
+  const inMonth = r => pbState.month==='all' || monthOf(r.base?r.date:r.t.date)===pbState.month;
+  const real = all.filter(r=>!r.base);
+
+  // 요약: 기간 안에서 잔액에 반영된 입금·출금, 기간 말 잔액
+  const period = real.filter(r=>r.in && inMonth(r));
+  const inSum  = period.filter(r=>r.delta>0).reduce((s,r)=>s+r.delta,0);
+  const outSum = period.filter(r=>r.delta<0).reduce((s,r)=>s-r.delta,0);
+  let endLabel, endBal;
+  if(pbState.month==='all'){ endLabel='시작 잔액'; endBal = a.opening||0; }
+  else{
+    const last = pbState.month + '-31';
+    const before = all.filter(r=> (r.base || r.in) && (r.base ? r.date : r.t.date) <= last);
+    const lastRow = before[before.length-1];
+    endLabel = pbState.month===monthOf(today) ? '이달 기록 뒤 잔액' : Number(pbState.month.slice(5))+'월 말 잔액';
+    endBal = lastRow ? lastRow.bal : null;
+  }
+
+  let shown = all.filter(inMonth);
+  if(pbState.dir==='in')  shown = shown.filter(r=>r.base || r.delta>0);
+  if(pbState.dir==='out') shown = shown.filter(r=>r.base || r.delta<0);
+  shown = shown.slice().reverse();                        // 최신이 위로
+
+  let lastDay = '';
+  const rowsHtml = shown.map(r=>{
+    const d = r.base ? r.date : r.t.date;
+    const day = d!==lastDay ? `<div class="pb-day num">${d.replace(/-/g,'.')} (${WD[new Date(d+'T00:00:00').getDay()]})</div>` : '';
+    lastDay = d;
+    if(r.base) return day + `
+      <div class="lrow base">
+        <span class="d num">기준</span>
+        <span class="m"><span class="t">${a.asOf?'잔액 맞춤':'시작 잔액'}</span><span class="s">${a.asOf?'직접 넣은 실제 잔액 · 이보다 앞선 기록은 이미 들어 있는 것으로 봅니다':'통장을 등록할 때 넣은 금액'}</span></span>
+        <span class="a num">${won(r.bal)}</span><span></span>
+      </div>`;
+    const t = r.t, cls = r.delta>0 ? 'i' : 'o';
+    const tags = (!r.in ? ' <span class="tag">기준 전</span>' : '') + (t.date>today ? ' <span class="tag" style="color:var(--out);border-color:var(--out)">미래 날짜</span>' : '');
+    return day + `
+      <div class="lrow ${r.in?'':'off'}">
+        <span class="d num">${t.date.slice(5).replace('-','.')}</span>
+        <span class="m"><span class="t">${esc(pbTitle(t,id))}${tags}</span><span class="s">${esc(pbSub(t,id))}</span></span>
+        <span class="a num ${cls}">${r.delta>0?'+':'−'}${won(Math.abs(r.delta))}<span class="bal">${r.bal===null?'잔액 미반영':'잔액 '+won(r.bal)}</span></span>
+        <button class="icon x" data-pb-del="${t.id}" aria-label="이 기록 삭제">×</button>
+      </div>`;
+  }).join('');
+
+  const offCount = real.filter(r=>!r.in).length;
+  m.innerHTML = `
+    <h3>${esc(a.name)} 내역</h3>
+    <p class="sub">${esc(kindName(a))} · 현재 잔액 <b class="num">${won(accountBalance(id))}</b>${offCount?` · 기준 전 기록 ${offCount}건은 잔액에 다시 넣지 않습니다`:''}</p>
+    <div class="pb-bar">
+      <select id="pbMonth">
+        <option value="all" ${pbState.month==='all'?'selected':''}>전체 기간</option>
+        ${months.map(v=>`<option value="${v}" ${v===pbState.month?'selected':''}>${v.replace('-','.')}</option>`).join('')}
+      </select>
+      ${[['all','전체'],['in','입금'],['out','출금']].map(([k,l])=>`<button class="chip" data-pb-dir="${k}" aria-pressed="${pbState.dir===k}">${l}</button>`).join('')}
+    </div>
+    <div class="pb-sum num">
+      <div><span>입금</span><strong style="color:var(--in)">${won(inSum)}</strong></div>
+      <div><span>출금</span><strong style="color:var(--out)">${won(outSum)}</strong></div>
+      <div><span>${endLabel}</span><strong>${endBal===null?'—':won(endBal)}</strong></div>
+      <div><span>현재 잔액</span><strong>${won(accountBalance(id))}</strong></div>
+    </div>
+    <div class="pb-list">${rowsHtml || `<div class="hint" style="padding:14px 0">이 기간에 입출금 기록이 없습니다.</div>`}</div>
+    <div class="mfoot">
+      <button class="act quiet" id="pbCsv">이 통장 CSV</button>
+      <span class="right"><button class="act" id="pbEdit">잔액 맞추기</button><button class="act primary" id="pbClose">닫기</button></span>
+    </div>`;
+  $('#veil').classList.add('open');
+  const close = ()=>{ m.classList.remove('wide'); closeModal(); };
+  $('#pbClose').onclick = close;
+  $('#pbEdit').onclick = ()=>{ m.classList.remove('wide'); openForm('account',{id}); };
+  $('#pbMonth').onchange = e=>{ pbState.month = e.target.value; passbook(id); };
+  m.querySelectorAll('[data-pb-dir]').forEach(b=>b.onclick=()=>{ pbState.dir = b.dataset.pbDir; passbook(id); });
+  m.querySelectorAll('[data-pb-del]').forEach(b=>b.onclick=()=>{
+    const t = S.txns.find(x=>x.id===b.dataset.pbDel); if(!t) return;
+    if(!confirm(`${t.date.replace(/-/g,'.')} '${pbTitle(t,id)}' ${won(t.amount)} 기록을 지울까요?`)) return;
+    deleteTxn(t.id); passbook(id);
+  });
+  $('#pbCsv').onclick = ()=>{
+    const rows = [['날짜','내용','상대','입금','출금','잔액','잔액 반영']];
+    all.forEach(r=>{
+      if(r.base){ rows.push([r.date, a.asOf?'잔액 맞춤':'시작 잔액','','','',r.bal,'기준']); return; }
+      rows.push([r.t.date, pbTitle(r.t,id), pbSub(r.t,id), r.delta>0?r.delta:'', r.delta<0?-r.delta:'', r.bal===null?'':r.bal, r.in?'O':'기준 전']);
+    });
+    const csv='﻿'+rows.map(x=>x.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+    const el=document.createElement('a'); el.href=url; el.download=a.name+'_내역_'+today+'.csv'; el.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000); toast('CSV로 내보냈습니다.');
+  };
+}
+
 /* ══ 입력 폼 ═══════════════════════════════════════════ */
-function closeModal(){ $('#veil').classList.remove('open'); $('#modal').innerHTML=''; }
+function closeModal(){ $('#veil').classList.remove('open'); $('#modal').classList.remove('wide'); $('#modal').innerHTML=''; }
 $('#veil').addEventListener('click', e=>{ if(e.target.id==='veil') closeModal(); });
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeModal(); });
 
 function moneyInput(el){
   if(!el) return;
   el.addEventListener('input', ()=>{
+    const neg = el.dataset.signed && /^\s*-/.test(el.value);        // 마이너스 통장처럼 음수 잔액 허용
     const digits = el.value.replace(/[^\d]/g,'');
-    el.value = digits ? Number(digits).toLocaleString('ko-KR') : '';
+    el.value = (neg?'-':'') + (digits ? Number(digits).toLocaleString('ko-KR') : '');
   });
 }
 const parseMoney = el => Number(String(el.value).replace(/[^\d]/g,''))||0;
+/** 주말·공휴일 처리 방식 고르기 */
+function shiftField(cur, note){
+  return `<div class="field shiftField"><label>주말·공휴일이면</label><div class="seg shiftSeg">
+    ${SHIFT_MODES.map(([v,l])=>`<button type="button" data-v="${v}" aria-pressed="${normMode(cur)===v}">${l}</button>`).join('')}
+  </div><div class="note">${note||'은행·기관마다 다릅니다. 통장 거래내역에서 휴일에 걸렸던 달을 보면 알 수 있어요.'}</div></div>`;
+}
+function bindShift(root, onChange){
+  root.querySelectorAll('.shiftSeg button').forEach(b=>b.onclick=()=>{
+    root.querySelectorAll('.shiftSeg button').forEach(x=>x.setAttribute('aria-pressed', x===b));
+    if(onChange) onChange();
+  });
+}
+const readShift = root => { const b = root.querySelector('.shiftSeg [aria-pressed="true"]'); return b ? b.dataset.v : 'same'; };
+const parseSigned = el => (/^\s*-/.test(el.value) ? -1 : 1) * parseMoney(el);
 function accOptions(sel){
   return S.accounts.map(a=>{
     const tag = a.kind==='savings'?' [적금]':a.parked?' [모아두는]':a.kind==='cash'?' [현금]':'';
@@ -1307,8 +1560,8 @@ function openForm(kind, ctx={}){
         <button type="button" data-v="savings" aria-pressed="${!!(a&&a.kind==='savings')}">적금</button>
         <button type="button" data-v="cash" aria-pressed="${!!(a&&a.kind==='cash')}">현금</button>
       </div></div>
-      <div class="field"><label for="f2">${a?'기준 잔액':'현재 잔액'}</label><input id="f2" class="money" inputmode="numeric" value="${a?(a.opening||0).toLocaleString('ko-KR'):''}" placeholder="0">
-        <div class="note" id="openNote">${a?'기록된 거래는 이 금액 위에 다시 계산됩니다.':''}</div></div>
+      <div class="field"><label for="f2">지금 통장에 찍힌 잔액</label><input id="f2" class="money" data-signed="1" inputmode="numeric" value="${a?accountBalance(a.id).toLocaleString('ko-KR'):''}" placeholder="0">
+        <div class="note" id="openNote"></div></div>
       <div class="field" id="parkWrap">
         <label for="park" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;color:var(--ink)">
           <input type="checkbox" id="park" ${a&&a.parked?'checked':''} style="width:16px;height:16px;margin-top:3px;accent-color:#17233A">
@@ -1325,8 +1578,9 @@ function openForm(kind, ctx={}){
           <select id="f6"><option value="">자동이체 안 함 (직접 넣기)</option>${
             S.accounts.filter(x=>!isParked(x)&&(!a||x.id!==a.id)).map(x=>`<option value="${x.id}" ${a&&a.fromId===x.id?'selected':''}>${esc(x.name)}</option>`).join('')
           }</select>
-          <div class="note">지정하면 넣는 날 당일에 이 통장에서 자동으로 옮겨 기록합니다. 적금은 주말에도 당일 출금됩니다.</div>
+          <div class="note">지정하면 넣는 날에 이 통장에서 자동으로 옮겨 기록합니다.</div>
         </div>
+        ${shiftField(shiftOf(a,'same'), '적금은 휴일에도 그날 빠지는 곳이 많지만, 다음 영업일에 빠지는 곳도 있습니다.')}
         <div class="field" id="maturityWrap"><label for="f5">만기일</label><input id="f5" type="date" value="${a&&a.maturity?a.maturity:''}"><div class="note">몰라도 됩니다. 비워두면 표시만 생략됩니다.</div></div>
       </div>
       <div class="err" id="err"></div>
@@ -1340,9 +1594,10 @@ function openForm(kind, ctx={}){
       $('#parkWrap').style.display = sv?'none':'block';       // 적금은 언제나 제외 대상
       $('#savingOnly').style.display = (sv||parked())?'block':'none';
       $('#maturityWrap').style.display = sv?'block':'none';
-      $('#openNote').textContent = (sv||parked())
-        ? (a?'지금까지 모인 금액입니다. 넣은 기록은 이 위에 더해집니다.':'지금까지 모인 금액을 넣어 주세요.')
-        : (a?'기록된 거래는 이 금액 위에 다시 계산됩니다.':'');
+      $('#openNote').textContent = a
+        ? '지금 앱이 계산한 잔액입니다. 은행 앱과 다르면 실제 잔액으로 고치세요. 이 시각을 기준으로 다시 맞추고, 그 전 기록은 잔액 계산에서 빠집니다(내역에는 남음).'
+        : (sv||parked()) ? '지금까지 모인 금액을 넣어 주세요. 오늘 이후 기록만 이 위에 더해집니다.'
+        : '은행 앱에 보이는 잔액 그대로. 오늘 이후 기록만 이 위에 더하고 뺍니다.';
     };
     m.querySelectorAll('#kind button').forEach(b=>b.onclick=()=>{
       kindV=b.dataset.v;
@@ -1350,20 +1605,31 @@ function openForm(kind, ctx={}){
       syncKind();
     });
     $('#park').onchange = syncKind;
-    syncKind(); moneyInput($('#f2')); moneyInput($('#f3'));
+    syncKind(); moneyInput($('#f2')); moneyInput($('#f3')); bindShift(m);
     $('#ok').onclick=()=>{
       const name=$('#f1').value.trim(); if(!name){$('#err').textContent='이름을 입력해 주세요.';return;}
       const isPark = parked();
-      const rec={ name, kind:kindV, opening:parseMoney($('#f2')), parked:isPark };
+      const typed = parseSigned($('#f2'));
+      const rec={ name, kind:kindV, parked:isPark };
+      let fixMsg = '';
+      if(!a){ rec.opening = typed; stampBase(rec); }
+      else{
+        const cur = accountBalance(a.id);
+        if(typed !== cur){
+          rec.opening = typed; stampBase(rec);
+          fixMsg = ` 앱 계산보다 ${won(Math.abs(typed-cur))} ${typed>cur?'많아':'적어'} 지금 잔액으로 맞췄습니다.`;
+        }
+      }
       if(kindV==='savings' || isPark){
         rec.monthly = parseMoney($('#f3'));
         rec.payDay = Math.min(31,Math.max(0,Number(String($('#f4').value).replace(/[^\d]/g,''))||0));
         rec.maturity = kindV==='savings' ? ($('#f5').value || '') : '';
         rec.fromId = $('#f6').value || '';
-        if(rec.fromId && !(a && a.since)) rec.since = monthOf(todayStr());   // 지난 달까지 소급하지 않는다
+        rec.shift = readShift(m);
+        if(rec.fromId && !(a && a.since)) rec.since = todayStr();   // 지난 달까지 소급하지 않는다
       }else{ rec.monthly=0; rec.payDay=null; rec.maturity=''; rec.fromId=''; }
       if(a) Object.assign(a,rec); else S.accounts.push(Object.assign({id:uid()},rec));
-      closeModal(); commit(a?'통장을 저장했습니다.':(kindV==='savings'?'적금 통장을 추가했습니다.':(isPark?'모아두는 통장을 추가했습니다.':'통장을 추가했습니다.')));
+      closeModal(); commit(a?'통장을 저장했습니다.'+fixMsg:(kindV==='savings'?'적금 통장을 추가했습니다.':(isPark?'모아두는 통장을 추가했습니다.':'통장을 추가했습니다.')));
     };
   }
 
@@ -1380,7 +1646,10 @@ function openForm(kind, ctx={}){
       <div class="field"><label for="f2">결제 통장</label><select id="f2">${accOptions(c?c.accountId:null)}</select></div>
       <div class="two" id="creditOnly">
         <div class="field"><label for="f3">결제일</label><input id="f3" inputmode="numeric" value="${c?(c.payDay||''):''}" placeholder="14"><div class="note">매월 며칠</div></div>
-        <div class="field"><label for="f4">현재 결제 예정액</label><input id="f4" class="money" inputmode="numeric" value="${c?(c.opening||0).toLocaleString('ko-KR'):''}" placeholder="0"></div>
+        <div class="field"><label for="f4">결제 예정 금액 (청구된 것)</label><input id="f4" class="money" inputmode="numeric" value="${c?Math.max(0,dueNow(c)).toLocaleString('ko-KR'):''}" placeholder="0"><div class="note">다음 결제일에 빠질 돈</div></div>
+      </div>
+      <div class="field" id="unbilledWrap"><label for="f8">아직 청구 안 된 이용금액</label><input id="f8" class="money" inputmode="numeric" value="${c?Math.max(0,cardDue(c.id)-dueNow(c)).toLocaleString('ko-KR'):''}" placeholder="0">
+        <div class="note">${c?'둘 다 앱이 계산한 금액입니다. 카드사 앱과 다르면 고치세요. 이 시각 기준으로 다시 맞추고, 그 전 카드 기록은 미결제액 계산에서 빠집니다.':'카드사 앱의 미청구(이용 중) 금액. 두 금액에 든 사용분은 나중에 명세서로 불러와도 두 번 쌓이지 않습니다.'}</div>
       </div>
       <div class="two" id="billWrap">
         <div class="field"><label>이용분 마감</label><div class="seg" id="bem">
@@ -1395,7 +1664,8 @@ function openForm(kind, ctx={}){
           <input type="checkbox" id="cauto" ${c&&c.auto?'checked':''} style="width:16px;height:16px;margin-top:3px;accent-color:#17233A">
           <span>결제일에 자동으로 출금</span>
         </label>
-        <div class="note">결제일이 주말이면 다음 영업일에 처리합니다. 그날까지 남은 미결제 잔액 전액을 결제 통장에서 뺍니다.</div>
+        ${shiftField(shiftOf(c,'next'), '카드값은 보통 다음 영업일에 빠집니다.')}
+        <div class="note">결제일에 그날까지 남은 미결제 잔액 전액을 결제 통장에서 뺍니다.</div>
       </div>
       <div class="err" id="err"></div>
       <div class="mfoot"><span></span><span class="right">
@@ -1406,7 +1676,7 @@ function openForm(kind, ctx={}){
     const billPreview=()=>{
       const d = Number(String($('#f7').value).replace(/[^\d]/g,''))||0;
       const day = Math.min(31,Math.max(0,d));
-      const fake = { payDay: Math.min(31,Math.max(1,Number(String($('#f3').value).replace(/[^\d]/g,''))||1)), billEnd:{m:bem,d:day} };
+      const fake = { shift: readShift(m), payDay: Math.min(31,Math.max(1,Number(String($('#f3').value).replace(/[^\d]/g,''))||1)), billEnd:{m:bem,d:day} };
       const now = new Date();
       const idx = now.getFullYear()*12 + now.getMonth() + 1;       // 다음 달 결제분으로 예시
       const from = (()=>{ const x=new Date(cutoffOf(fake, idx-1)+'T00:00:00'); x.setDate(x.getDate()+1); return ymd(x); })();
@@ -1414,6 +1684,7 @@ function openForm(kind, ctx={}){
       $('#billNote').textContent = `${from.replace(/-/g,'.')} ~ ${to.replace(/-/g,'.')} 에 쓴 금액이 ${dateLabel(payDateOf(fake, idx))}에 나갑니다`;
     };
     const sync=()=>{ $('#creditOnly').style.display = typeV==='credit'?'grid':'none';
+                     $('#unbilledWrap').style.display = typeV==='credit'?'block':'none';
                      $('#autoWrap').style.display = typeV==='credit'?'block':'none';
                      $('#billWrap').style.display = typeV==='credit'?'grid':'none';
                      $('#billNote').style.display = typeV==='credit'?'block':'none';
@@ -1422,16 +1693,22 @@ function openForm(kind, ctx={}){
     m.querySelectorAll('#bem button').forEach(b=>b.onclick=()=>{bem=Number(b.dataset.v);m.querySelectorAll('#bem button').forEach(x=>x.setAttribute('aria-pressed',x===b));billPreview();});
     $('#f7').addEventListener('input', billPreview);
     $('#f3').addEventListener('input', billPreview);
-    sync(); moneyInput($('#f4'));
+    sync(); moneyInput($('#f4')); moneyInput($('#f8')); bindShift(m, billPreview);
     $('#ok').onclick=()=>{
       const name=$('#f1').value.trim(); if(!name){$('#err').textContent='이름을 입력해 주세요.';return;}
       const day=Math.min(31,Math.max(0,Number(String($('#f3').value).replace(/[^\d]/g,''))||0));
       const cauto = typeV==='credit' && $('#cauto').checked;
       const bd = Math.min(31,Math.max(0,Number(String($('#f7').value).replace(/[^\d]/g,''))||0));
       const rec={name,type:typeV,accountId:$('#f2').value,payDay:typeV==='credit'?day:null,
-                 opening:typeV==='credit'?parseMoney($('#f4')):0, auto:cauto,
-                 billEnd: typeV==='credit'? {m:bem, d:bd} : null};
-      if(cauto && !(c && c.since)) rec.since = monthOf(todayStr());
+                 auto:cauto, shift: readShift(m), billEnd: typeV==='credit'? {m:bem, d:bd} : null};
+      const billed   = typeV==='credit' ? parseMoney($('#f4')) : 0;
+      const unbilled = typeV==='credit' ? parseMoney($('#f8')) : 0;
+      if(!c){ rec.opening = billed; rec.openingNext = unbilled; stampBase(rec); }
+      else if(typeV!=='credit'){ rec.opening = 0; rec.openingNext = 0; }
+      else if(billed !== Math.max(0,dueNow(c)) || unbilled !== Math.max(0,cardDue(c.id)-dueNow(c))){
+        rec.opening = billed; rec.openingNext = unbilled; stampBase(rec);
+      }
+      if(cauto && !(c && c.since)) rec.since = todayStr();
       if(c) Object.assign(c,rec); else S.cards.push(Object.assign({id:uid()},rec));
       closeModal(); commit(c?'카드를 저장했습니다.':'카드를 추가했습니다.');
     };
@@ -1544,10 +1821,10 @@ function openForm(kind, ctx={}){
       const c=curCard();
       $('#f1').value=Math.max(0,dueNow(c)).toLocaleString('ko-KR');
       if(c.accountId) $('#f3').value=c.accountId;
-      const p=nextPayDate(c.payDay);
+      const p=nextPayDate(c.payDay, shiftOf(c,'next'));
       const rest = cardDue(c.id) - dueNow(c);
       $('#payNote').innerHTML = (p
-        ? `이번 결제 예정일 ${dateLabel(p.date)}${p.shifted?' — 원래 '+c.payDay+'일인데 주말이라 밀립니다':''}`
+        ? `이번 결제 예정일 ${dateLabel(p.date)}${p.shifted?' — 원래 '+c.payDay+'일인데 주말·공휴일이라 '+(p.dir==='prev'?'당겨집니다':'밀립니다'):''}`
         : '카드 수정에서 결제일을 넣으면 예정일을 알려줍니다.')
         + (rest>0? `<br>이번 달 사용분 ${won(rest)} 은 다음 결제일 몫이라 빼뒀습니다.` : '');
     };
@@ -1751,7 +2028,7 @@ function openForm(kind, ctx={}){
     const opts = (sel)=> S.accounts.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('');
     m.innerHTML=`
       <h3>${x?'자동이체 수정':'자동이체 추가'}</h3>
-      <p class="sub">매달 같은 날 빠지는 이체나 고정 지출을 등록합니다. 날짜가 주말이면 다음 영업일에 처리합니다.</p>
+      <p class="sub">매달 같은 날 빠지는 이체나 고정 지출을 등록합니다. 주말·공휴일에 걸리면 어떻게 할지 항목마다 고를 수 있습니다.</p>
       <div class="field"><label>종류</label><div class="seg" id="akind">
         <button type="button" data-v="transfer" aria-pressed="${!x||x.kind==='transfer'}">계좌 이체</button>
         <button type="button" data-v="expense" aria-pressed="${!!(x&&x.kind==='expense')}">고정 지출</button>
@@ -1761,6 +2038,7 @@ function openForm(kind, ctx={}){
         <div class="field"><label for="g2">금액</label><input id="g2" class="money" inputmode="numeric" value="${x?x.amount.toLocaleString('ko-KR'):''}" placeholder="0"></div>
         <div class="field"><label for="g3">빠지는 날</label><input id="g3" inputmode="numeric" value="${x?x.day:''}" placeholder="25"><div class="note">매월 며칠</div></div>
       </div>
+      ${shiftField(shiftOf(x,'next'))}
       <div class="field"><label for="g4">나가는 통장</label><select id="g4">${opts(x?x.fromId:null)}</select></div>
       <div class="field" id="toWrap"><label for="g5">받는 통장</label><select id="g5">${opts(x?x.toId:(S.accounts[1]&&S.accounts[1].id))}</select></div>
       <div class="field" id="catWrap"><label for="g6">분류</label><select id="g6">${CATS.map(c=>`<option ${x&&x.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
@@ -1772,7 +2050,7 @@ function openForm(kind, ctx={}){
     const syncAk=()=>{ $('#toWrap').style.display = ak==='transfer'?'block':'none';
                        $('#catWrap').style.display = ak==='expense'?'block':'none'; };
     m.querySelectorAll('#akind button').forEach(b=>b.onclick=()=>{ak=b.dataset.v;m.querySelectorAll('#akind button').forEach(v=>v.setAttribute('aria-pressed',v===b));syncAk();});
-    syncAk(); moneyInput($('#g2'));
+    syncAk(); moneyInput($('#g2')); bindShift(m);
     $('#ok').onclick=()=>{
       const name=$('#g1').value.trim(); if(!name){$('#err').textContent='이름을 입력해 주세요.';return;}
       const amount=parseMoney($('#g2')); if(!amount){$('#err').textContent='금액을 입력해 주세요.';return;}
@@ -1780,10 +2058,11 @@ function openForm(kind, ctx={}){
       if(!day){$('#err').textContent='빠지는 날을 입력해 주세요.';return;}
       if(ak==='transfer' && $('#g4').value===$('#g5').value){$('#err').textContent='나가는 통장과 받는 통장이 같습니다.';return;}
       const rec={ kind:ak, name, amount, day, fromId:$('#g4').value,
-                  toId: ak==='transfer'? $('#g5').value : '', category: ak==='expense'? $('#g6').value : '', off:false };
+                  toId: ak==='transfer'? $('#g5').value : '', category: ak==='expense'? $('#g6').value : '', off:false,
+                  shift: readShift(m) };
       if(!S.autos) S.autos=[];
       if(x) Object.assign(x, rec);
-      else S.autos.push(Object.assign({id:uid(), since:monthOf(todayStr())}, rec));
+      else S.autos.push(Object.assign({id:uid(), since:todayStr()}, rec));
       closeModal(); commit(x?'자동이체를 저장했습니다.':'자동이체를 등록했습니다.');
       if(runAutos()) render();
     };
@@ -2215,7 +2494,13 @@ function previewModal(parsed, fname){
   labels.forEach(l=>{ if(map[l]===undefined) map[l] = guessCardId(l); });
   const single = !labels.length;
 
-  parsed.rows.forEach((r,i)=>{ r.i=i; r.dup = dup.has(r.key); r.on = !r.dup; });
+  // 직접 입력해 둔 같은 결제(같은 날·같은 금액)는 가맹점 이름이 달라 정확히는 못 잡는다. 따로 표시하고 기본으로 빼 둔다
+  const sameDayAmt = new Set(S.txns.filter(t=>t.type==='expense' && t.src!=='import').map(t=>t.date+'|'+t.amount));
+  parsed.rows.forEach((r,i)=>{
+    r.i=i; r.dup = dup.has(r.key);
+    r.similar = !r.dup && sameDayAmt.has(r.date+'|'+r.amount);
+    r.on = !r.dup && !r.similar;
+  });
 
   m.innerHTML = `
     <h3>불러올 내역 확인</h3>
@@ -2249,7 +2534,7 @@ function previewModal(parsed, fname){
         <div class="prow ${r.dup?'dup':''}" data-row="${r.i}">
           <input type="checkbox" ${r.on?'checked':''} data-on="${r.i}" aria-label="${esc(r.merchant)} 포함">
           <span class="num" style="font-size:.8rem;color:var(--ink-faint)">${r.date.slice(5).replace('-','.')}</span>
-          <span class="pm">${esc(r.merchant)}${r.dup?'<span class="tag">이미 있음</span>':''}${r.inst?`<span class="tag">할부 ${esc(r.inst)}</span>`:''}${r.amount<0?'<span class="tag">취소</span>':''}</span>
+          <span class="pm">${esc(r.merchant)}${r.dup?'<span class="tag">이미 있음</span>':''}${r.similar?'<span class="tag" style="color:var(--out);border-color:var(--out)" title="같은 날 같은 금액으로 직접 넣은 기록이 있습니다. 같은 결제면 체크하지 마세요">직접 넣은 기록과 겹침?</span>':''}${r.inst?`<span class="tag">할부 ${esc(r.inst)}</span>`:''}${r.amount<0?'<span class="tag">취소</span>':''}</span>
           <span class="pa num ${r.amount<0?'minus':''}">${won(r.amount)}</span>
           <select data-cat="${r.i}">${CATS.map(c=>`<option ${c===r.category?'selected':''}>${c}</option>`).join('')}</select>
         </div>`).join('')}
